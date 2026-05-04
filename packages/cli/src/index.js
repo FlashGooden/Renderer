@@ -5,7 +5,7 @@ import { loadProjectConfig } from "../../core/src/config.js";
 function printUsage() {
   console.log(`Usage:
   avatar upload <file> --kind reference|driving [--label name]
-  avatar run --reference <asset-id> --video <asset-id> [--preset preview-720p] [--provider mock-primary] [--notes text]
+  avatar run --reference <asset-id> --video <asset-id> [--preset preview-720p] [--provider replicate-dreamactor] [--notes text]
   avatar status <run-id> [--json]
   avatar fetch <run-id> [--output-dir ./outputs]
   avatar review <run-id> --decision approve|reject [--notes text] [--tag name]
@@ -101,7 +101,7 @@ async function commandUpload(config, filePath, flags) {
 
 async function commandRun(config, flags) {
   const payload = await requestJson(config.runnerUrl, "POST", "/runs", {
-    providerId: flags.provider || "mock-primary",
+    providerId: flags.provider || "replicate-dreamactor",
     spec: {
       referenceAssetId: requireFlag(flags, "reference"),
       sourceVideoAssetId: requireFlag(flags, "video"),
@@ -128,6 +128,12 @@ async function commandStatus(config, runId, flags) {
   console.log(`Provider: ${payload.run.providerId}`);
   console.log(`Preset: ${payload.run.presetId}`);
   console.log(`Cost (estimated): $${payload.run.cost.estimatedUsd.toFixed(3)}`);
+  if (payload.run.provider) {
+    console.log(`Provider status: ${payload.run.provider.status}`);
+    if (payload.run.provider.runId) {
+      console.log(`Provider run: ${payload.run.provider.runId}`);
+    }
+  }
   if (payload.run.failureReason) {
     console.log(`Failure: ${payload.run.failureReason}`);
   }
@@ -270,4 +276,3 @@ main().catch((error) => {
   console.error(error.message);
   process.exitCode = 1;
 });
-
