@@ -5,9 +5,85 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { createRunnerServer } from "../src/server.js";
+import { Readable } from "node:stream";
+import { FileJobStore } from "../../core/src/job-store.js";
+import { createStorageDriver } from "../../core/src/storage.js";
+import { AvatarService } from "../../core/src/service.js";
+import { createRunnerHandler } from "../src/server.js";
 
 const execFileAsync = promisify(execFile);
+
+class FakeHandlerProvider {
+  constructor() {
+    this.id = "fake-handler-provider";
+    this.displayName = "Fake Handler Provider";
+    this.modelId = "fake/handler";
+  }
+
+  validateRun() {}
+
+  async submitRun(context) {
+    this.sourceVideoPath = context.sourceVideoPath;
+    return {
+      providerRunId: "handler_run_123",
+      providerState: {
+        providerRunId: "handler_run_123",
+        modelId: this.modelId,
+        status: "starting",
+        createdAt: new Date().toISOString()
+      },
+      rawRequest: {
+        input: {
+          presetId: context.preset.id
+        }
+      },
+      rawResponse: {
+        id: "handler_run_123",
+        status: "starting"
+      }
+    };
+  }
+
+  async pollRun(state) {
+    this.pollCount = (this.pollCount || 0) + 1;
+    const terminal = this.pollCount > 1;
+    return {
+      providerState: {
+        ...state,
+        status: terminal ? "succeeded" : "processing",
+        output: terminal ? "https://replicate.delivery/handler-output.mp4" : null,
+        completedAt: terminal ? new Date().toISOString() : null
+      },
+      rawResponse: {
+        id: state.providerRunId,
+        status: terminal ? "succeeded" : "processing",
+        output: terminal ? "https://replicate.delivery/handler-output.mp4" : null
+      },
+      terminal
+    };
+  }
+
+  async cancelRun() {
+    return null;
+  }
+
+  normalizeTerminalState() {
+    return null;
+  }
+
+  async collectResult(state, { runId }) {
+    const outputPath = path.join(os.tmpdir(), "avatar-project", runId, "handler-output.mp4");
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.copyFile(this.sourceVideoPath, outputPath);
+    return {
+      outputPath,
+      outputUrl: state.output,
+      usage: {
+        estimatedCostUsd: 0.12
+      }
+    };
+  }
+}
 
 async function createMediaFixtures(dir) {
   const referencePath = path.join(dir, "reference.png");
@@ -38,98 +114,159 @@ async function createMediaFixtures(dir) {
   return { referencePath, sourcePath };
 }
 
-async function upload(baseUrl, filePath, kind) {
-  const buffer = await fs.readFile(filePath);
-  const response = await fetch(new URL("/assets", baseUrl), {
-    method: "POST",
-    headers: {
-      "content-type": "application/octet-stream",
-      "x-avatar-kind": kind,
-      "x-avatar-filename": path.basename(filePath)
-    },
-    body: buffer
-  });
-  assert.equal(response.status, 201);
-  const payload = await response.json();
-  return payload.asset.id;
-}
-
-async function getRun(baseUrl, runId) {
-  const response = await fetch(new URL(`/runs/${runId}`, baseUrl));
-  assert.equal(response.status, 200);
-  const payload = await response.json();
-  return payload.run;
-}
-
-test("runner supports upload, run, fetch, and review", async () => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-runner-"));
-  const { referencePath, sourcePath } = await createMediaFixtures(rootDir);
-  const server = await createRunnerServer({
+async function createHarness() {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-runner-handler-"));
+  const config = {
     runnerPort: 0,
     runnerUrl: "http://127.0.0.1:0",
     dataDir: path.join(rootDir, ".avatar"),
     storageMode: "local",
-    azureBlobBaseUrl: ""
+    azureBlobBaseUrl: "",
+    replicateApiToken: "test-token",
+    replicateModel: "bytedance/dreamactor-m2.0",
+    providerTimeoutSec: 1,
+    providerPollIntervalMs: 5
+  };
+  const provider = new FakeHandlerProvider();
+  const providers = {
+    get(providerId) {
+      if (providerId !== provider.id) {
+        throw new Error(`Unknown provider ${providerId}`);
+      }
+      return provider;
+    },
+    list() {
+      return [provider.id];
+    }
+  };
+  const jobStore = new FileJobStore(config.dataDir);
+  const storageDriver = createStorageDriver(config);
+  const service = new AvatarService({ config, jobStore, storageDriver, providers });
+  await service.initialize();
+
+  return {
+    service,
+    storageDriver,
+    providers,
+    handler: createRunnerHandler({ service, storageDriver, providers })
+  };
+}
+
+async function invoke(handler, method, url, { headers = {}, body = null } = {}) {
+  const request = Readable.from(body ? [body] : []);
+  request.method = method;
+  request.url = url;
+  request.headers = headers;
+
+  let statusCode = null;
+  let responseHeaders = {};
+  const chunks = [];
+  const response = {
+    writeHead(code, nextHeaders) {
+      statusCode = code;
+      responseHeaders = nextHeaders;
+    },
+    end(chunk = "") {
+      if (chunk) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+    }
+  };
+
+  await handler(request, response);
+
+  const buffer = Buffer.concat(chunks);
+  const contentType = responseHeaders["content-type"] || "";
+  return {
+    statusCode,
+    headers: responseHeaders,
+    buffer,
+    text: buffer.toString("utf8"),
+    json: buffer.length && contentType.includes("application/json") ? JSON.parse(buffer.toString("utf8")) : null
+  };
+}
+
+async function waitForRun(handler, runId) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const response = await invoke(handler, "GET", `/runs/${runId}`);
+    const run = response.json.run;
+    if (!["queued", "running"].includes(run.state)) {
+      return run;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Run ${runId} did not complete`);
+}
+
+test("runner handler supports upload, run, fetch, review, and async provider metadata", async () => {
+  const harness = await createHarness();
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-handler-media-"));
+  const { referencePath, sourcePath } = await createMediaFixtures(rootDir);
+
+  const health = await invoke(harness.handler, "GET", "/health");
+  assert.equal(health.statusCode, 200);
+  assert.equal(health.json.defaultProvider, "replicate-dreamactor");
+
+  const referenceUpload = await invoke(harness.handler, "POST", "/assets", {
+    headers: {
+      "x-avatar-kind": "reference",
+      "x-avatar-filename": path.basename(referencePath)
+    },
+    body: await fs.readFile(referencePath)
   });
+  assert.equal(referenceUpload.statusCode, 201);
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const sourceUpload = await invoke(harness.handler, "POST", "/assets", {
+    headers: {
+      "x-avatar-kind": "driving",
+      "x-avatar-filename": path.basename(sourcePath)
+    },
+    body: await fs.readFile(sourcePath)
+  });
+  assert.equal(sourceUpload.statusCode, 201);
 
-  try {
-    const referenceAssetId = await upload(baseUrl, referencePath, "reference");
-    const sourceAssetId = await upload(baseUrl, sourcePath, "driving");
-
-    const runResponse = await fetch(new URL("/runs", baseUrl), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        providerId: "mock-primary",
+  const runResponse = await invoke(harness.handler, "POST", "/runs", {
+    headers: {
+      "content-type": "application/json"
+    },
+    body: Buffer.from(
+      JSON.stringify({
+        providerId: "fake-handler-provider",
         spec: {
-          referenceAssetId,
-          sourceVideoAssetId: sourceAssetId,
-          presetId: "preview-720p",
-          outputProfile: "preview"
+          referenceAssetId: referenceUpload.json.asset.id,
+          sourceVideoAssetId: sourceUpload.json.asset.id,
+          presetId: "preview-720p"
         }
       })
-    });
+    )
+  });
+  assert.equal(runResponse.statusCode, 201);
 
-    assert.equal(runResponse.status, 201);
-    const runPayload = await runResponse.json();
+  const run = await waitForRun(harness.handler, runResponse.json.run.id);
+  assert.equal(run.state, "needs_review");
+  assert.equal(run.provider.runId, "handler_run_123");
+  assert.equal(run.lineage.finalOutput.sourceProviderUrl, "https://replicate.delivery/handler-output.mp4");
 
-    let run = await getRun(baseUrl, runPayload.run.id);
-    for (let attempt = 0; attempt < 30 && ["queued", "running"].includes(run.state); attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      run = await getRun(baseUrl, runPayload.run.id);
-    }
+  const outputArtifact = run.artifacts.find((artifact) => artifact.kind === "retargeted_video");
+  const artifactResponse = await invoke(
+    harness.handler,
+    "GET",
+    `/runs/${run.id}/artifacts/${outputArtifact.id}/content`
+  );
+  assert.equal(artifactResponse.statusCode, 200);
+  assert.equal(artifactResponse.buffer.length > 0, true);
 
-    assert.equal(run.state, "needs_review");
-    assert.equal(run.artifacts.length, 1);
-    assert.equal(run.evaluation.outputValid, true);
-
-    const artifactResponse = await fetch(new URL(`/runs/${run.id}/artifacts/${run.artifacts[0].id}/content`, baseUrl));
-    assert.equal(artifactResponse.status, 200);
-    const artifactBytes = Buffer.from(await artifactResponse.arrayBuffer());
-    assert.equal(artifactBytes.length > 0, true);
-
-    const reviewResponse = await fetch(new URL(`/runs/${run.id}/review`, baseUrl), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
+  const reviewResponse = await invoke(harness.handler, "POST", `/runs/${run.id}/review`, {
+    headers: {
+      "content-type": "application/json"
+    },
+    body: Buffer.from(
+      JSON.stringify({
         decision: "approve",
         notes: "usable"
       })
-    });
-
-    assert.equal(reviewResponse.status, 200);
-    const reviewed = await reviewResponse.json();
-    assert.equal(reviewed.run.state, "succeeded");
-  } finally {
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-  }
+    )
+  });
+  assert.equal(reviewResponse.statusCode, 200);
+  assert.equal(reviewResponse.json.run.state, "succeeded");
 });

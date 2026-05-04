@@ -1,32 +1,57 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { ASSET_KINDS, assertAssetKind, assertReviewDecision, validateRunSpec } from "./contracts.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { assertAssetKind, assertReviewDecision, validateRunSpec } from "./contracts.js";
 import { createId, sha256 } from "./ids.js";
-import { assertSupportedFilename, inspectMedia, writeTempFile, getExtension } from "./media.js";
+import {
+  assertSupportedFilename,
+  inspectMedia,
+  writeTempFile,
+  getExtension,
+  contentTypeForExtension
+} from "./media.js";
 import { getPreset } from "./presets.js";
 import { evaluateRun } from "./evaluation.js";
+import { normalizeReplicateFailure, ProviderError } from "./providers.js";
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function contentTypeForExtension(extension) {
-  switch (extension) {
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".webp":
-      return "image/webp";
-    case ".mov":
-      return "video/quicktime";
-    case ".webm":
-      return "video/webm";
-    default:
-      return "video/mp4";
-  }
+function cloneAssetRef(asset) {
+  return {
+    assetId: asset.id,
+    kind: asset.kind,
+    filename: asset.filename,
+    extension: asset.extension,
+    contentType: asset.contentType,
+    checksum: asset.checksum,
+    locator: asset.locator,
+    media: asset.media
+  };
+}
+
+function buildProviderSnapshot(provider, state = {}) {
+  state = state || {};
+  return {
+    id: provider.id,
+    displayName: provider.displayName || provider.id,
+    modelId: state.modelId || provider.modelId || null,
+    runId: state.providerRunId || null,
+    status: state.status || "queued",
+    submittedAt: state.createdAt || null,
+    startedAt: state.startedAt || null,
+    completedAt: state.completedAt || null,
+    lastPolledAt: state.lastPolledAt || null,
+    pollCount: Number(state.pollCount || 0)
+  };
+}
+
+function buildFailure(error, providerState = null) {
+  return normalizeReplicateFailure(error, {
+    providerStatus: providerState?.status || null
+  });
 }
 
 export class AvatarService {
@@ -49,18 +74,17 @@ export class AvatarService {
 
     const assetId = createId("asset");
     const extension = getExtension(filename);
+    const contentType = contentTypeForExtension(extension);
     const checksum = await sha256(buffer);
     const tempPath = await writeTempFile(assetId, filename, buffer);
     const media = await inspectMedia(tempPath);
 
-    if (kind === "driving" && media.durationSec > 10) {
-      throw new Error(`Driving video exceeds the 10 second limit (${media.durationSec.toFixed(2)}s).`);
-    }
+    this.assertAssetMedia(kind, media);
 
     const locator = await this.storageDriver.putBuffer(
       `inputs/${kind}/${assetId}${extension}`,
       buffer,
-      contentTypeForExtension(extension)
+      contentType
     );
 
     await fs.rm(tempPath, { force: true });
@@ -71,6 +95,7 @@ export class AvatarService {
       label,
       filename,
       extension,
+      contentType,
       checksum,
       createdAt: nowIso(),
       locator,
@@ -81,7 +106,7 @@ export class AvatarService {
     return asset;
   }
 
-  async createRun({ providerId = "mock-primary", spec }) {
+  async createRun({ providerId = "replicate-dreamactor", spec }) {
     const validatedSpec = validateRunSpec(spec);
     const [referenceAsset, sourceAsset] = await Promise.all([
       this.jobStore.getAsset(validatedSpec.referenceAssetId),
@@ -96,14 +121,17 @@ export class AvatarService {
     }
 
     const preset = getPreset(validatedSpec.presetId);
+    const provider = this.providers.get(providerId);
+    provider.validateRun({ referenceAsset, sourceAsset, preset });
+
     const runId = createId("run");
     const createdAt = nowIso();
-
     const run = {
       id: runId,
       state: "queued",
       reviewStatus: "pending",
       providerId,
+      provider: buildProviderSnapshot(provider),
       presetId: preset.id,
       outputProfile: validatedSpec.outputProfile,
       notes: validatedSpec.notes,
@@ -115,7 +143,22 @@ export class AvatarService {
         estimatedUsd: 0
       },
       evaluation: null,
+      failure: null,
       failureReason: null,
+      lineage: {
+        inputAssets: {
+          reference: cloneAssetRef(referenceAsset),
+          driving: cloneAssetRef(sourceAsset)
+        },
+        providerPayloads: {
+          submitRequestArtifactId: null,
+          submitResponseArtifactId: null,
+          pollArtifactIds: [],
+          terminalArtifactId: null,
+          cancelArtifactId: null
+        },
+        finalOutput: null
+      },
       createdAt,
       updatedAt: createdAt,
       startedAt: null,
@@ -164,13 +207,22 @@ export class AvatarService {
 
     await this.jobStore.saveReview(runId, review);
     const nextState = decision === "approve" ? "succeeded" : "failed";
-    const failureReason = decision === "reject" ? "Rejected during manual review." : null;
+    const failure = decision === "reject"
+      ? {
+          code: "provider_unknown",
+          message: "Rejected during manual review.",
+          retryable: false,
+          providerStatus: null,
+          details: {}
+        }
+      : null;
 
     return this.jobStore.updateRun(runId, (current) => ({
       ...current,
       state: nextState,
       reviewStatus: decision === "approve" ? "approved" : "rejected",
-      failureReason,
+      failure,
+      failureReason: failure?.message || null,
       updatedAt: reviewedAt,
       completedAt: current.completedAt || reviewedAt
     }));
@@ -191,40 +243,178 @@ export class AvatarService {
     }
     this.activeRuns.add(runId);
 
+    let providerState = null;
+
     try {
+      const run = await this.jobStore.getRun(runId);
+      const provider = this.providers.get(run.providerId);
+
       await this.jobStore.updateRun(runId, (current) => ({
         ...current,
         state: "running",
         attempts: current.attempts + 1,
+        provider: {
+          ...current.provider,
+          ...buildProviderSnapshot(provider, providerState),
+          status: "running"
+        },
         startedAt: current.startedAt || nowIso(),
         updatedAt: nowIso()
       }));
 
-      const run = await this.getRun(runId);
-      const preset = getPreset(run.presetId);
-      const provider = this.providers.get(run.providerId);
-      const referenceAsset = await this.jobStore.getAsset(run.referenceAssetId);
-      const sourceAsset = await this.jobStore.getAsset(run.sourceVideoAssetId);
+      const activeRun = await this.getRun(runId);
+      const preset = getPreset(activeRun.presetId);
+      const referenceAsset = await this.jobStore.getAsset(activeRun.referenceAssetId);
+      const sourceAsset = await this.jobStore.getAsset(activeRun.sourceVideoAssetId);
 
       const [referencePath, sourcePath] = await Promise.all([
         this.materializeLocator(referenceAsset.locator, `reference-${referenceAsset.id}${referenceAsset.extension}`),
         this.materializeLocator(sourceAsset.locator, `driving-${sourceAsset.id}${sourceAsset.extension}`)
       ]);
 
-      const providerResult = await provider.execute({
+      const submission = await provider.submitRun({
         runId,
         preset,
+        referenceAsset,
+        sourceAsset,
         sourceVideoPath: sourcePath,
         referenceImagePath: referencePath
       });
+      providerState = {
+        ...submission.providerState,
+        lastPolledAt: null,
+        pollCount: 0
+      };
 
-      const artifactId = createId("artifact");
-      const artifactLocator = await this.storageDriver.putFile(
-        `outputs/${runId}/${artifactId}.mp4`,
-        providerResult.outputPath,
-        "video/mp4"
-      );
+      const submitRequestArtifact = await this.persistJsonArtifact(runId, {
+        kind: "provider_submit_request",
+        filename: `${runId}-provider-submit-request.json`,
+        payload: submission.rawRequest
+      });
+      const submitResponseArtifact = await this.persistJsonArtifact(runId, {
+        kind: "provider_submit_response",
+        filename: `${runId}-provider-submit-response.json`,
+        payload: submission.rawResponse
+      });
 
+      await this.jobStore.updateRun(runId, (current) => ({
+        ...current,
+        provider: buildProviderSnapshot(provider, providerState),
+        artifacts: [...current.artifacts, submitRequestArtifact, submitResponseArtifact],
+        lineage: {
+          ...current.lineage,
+          providerPayloads: {
+            ...current.lineage.providerPayloads,
+            submitRequestArtifactId: submitRequestArtifact.id,
+            submitResponseArtifactId: submitResponseArtifact.id
+          }
+        },
+        updatedAt: nowIso()
+      }));
+
+      const pollStart = Date.now();
+      let pollSequence = 0;
+
+      while (true) {
+        if (Date.now() - pollStart >= this.config.providerTimeoutSec * 1000) {
+          const cancelPayload = await provider.cancelRun(providerState).catch(() => null);
+          let cancelArtifact = null;
+          if (cancelPayload) {
+            cancelArtifact = await this.persistJsonArtifact(runId, {
+              kind: "provider_cancel_response",
+              filename: `${runId}-provider-cancel-response.json`,
+              payload: cancelPayload
+            });
+            await this.jobStore.updateRun(runId, (current) => ({
+              ...current,
+              artifacts: [...current.artifacts, cancelArtifact],
+              lineage: {
+                ...current.lineage,
+                providerPayloads: {
+                  ...current.lineage.providerPayloads,
+                  cancelArtifactId: cancelArtifact.id
+                }
+              },
+              updatedAt: nowIso()
+            }));
+          }
+          throw new ProviderError("provider_timeout", `Provider timed out after ${this.config.providerTimeoutSec} seconds.`, {
+            providerStatus: providerState?.status || "running",
+            retryable: true
+          });
+        }
+
+        const pollResult = await provider.pollRun(providerState);
+        pollSequence += 1;
+        providerState = {
+          ...pollResult.providerState,
+          pollCount: pollSequence,
+          lastPolledAt: nowIso()
+        };
+
+        const pollArtifact = await this.persistJsonArtifact(runId, {
+          kind: "provider_poll_response",
+          filename: `${runId}-provider-poll-${String(pollSequence).padStart(3, "0")}.json`,
+          payload: pollResult.rawResponse
+        });
+
+        await this.jobStore.updateRun(runId, (current) => ({
+          ...current,
+          provider: buildProviderSnapshot(provider, providerState),
+          artifacts: [...current.artifacts, pollArtifact],
+          lineage: {
+            ...current.lineage,
+            providerPayloads: {
+              ...current.lineage.providerPayloads,
+              pollArtifactIds: [...current.lineage.providerPayloads.pollArtifactIds, pollArtifact.id]
+            }
+          },
+          updatedAt: nowIso()
+        }));
+
+        if (pollResult.terminal) {
+          const terminalArtifact = await this.persistJsonArtifact(runId, {
+            kind: "provider_terminal_response",
+            filename: `${runId}-provider-terminal-response.json`,
+            payload: pollResult.rawResponse
+          });
+
+          await this.jobStore.updateRun(runId, (current) => ({
+            ...current,
+            artifacts: [...current.artifacts, terminalArtifact],
+            lineage: {
+              ...current.lineage,
+              providerPayloads: {
+                ...current.lineage.providerPayloads,
+                terminalArtifactId: terminalArtifact.id
+              }
+            },
+            updatedAt: nowIso()
+          }));
+          break;
+        }
+
+        await delay(this.config.providerPollIntervalMs);
+      }
+
+      const terminalFailure = provider.normalizeTerminalState(providerState);
+      if (terminalFailure) {
+        throw terminalFailure;
+      }
+
+      const providerResult = await provider.collectResult(providerState, { runId });
+      const outputArtifact = await this.persistFileArtifact(runId, {
+        kind: "retargeted_video",
+        filename: `${runId}.mp4`,
+        sourcePath: providerResult.outputPath,
+        contentType: "video/mp4",
+        metadata: {
+          sourceProviderUrl: providerResult.outputUrl
+        }
+      });
+      const outputBuffer = await this.storageDriver.readBuffer(outputArtifact.locator);
+      const outputChecksum = await sha256(outputBuffer);
+      const outputMeta = await inspectMedia(providerResult.outputPath);
       const evaluation = await evaluateRun({
         sourceVideoPath: sourcePath,
         referenceImagePath: referencePath,
@@ -234,27 +424,61 @@ export class AvatarService {
       await this.jobStore.updateRun(runId, (current) => ({
         ...current,
         state: "needs_review",
-        artifacts: [
-          {
-            id: artifactId,
-            kind: "retargeted_video",
-            filename: `${runId}.mp4`,
-            locator: artifactLocator
-          }
-        ],
+        provider: buildProviderSnapshot(provider, providerState),
+        artifacts: current.artifacts.map((artifact) =>
+          artifact.id === outputArtifact.id
+            ? {
+                ...artifact,
+                metadata: {
+                  ...artifact.metadata,
+                  checksum: outputChecksum,
+                  sizeBytes: outputMeta.sizeBytes,
+                  durationSec: outputMeta.durationSec,
+                  width: outputMeta.width,
+                  height: outputMeta.height,
+                  contentType: "video/mp4"
+                }
+              }
+            : artifact
+        ),
         cost: {
-          estimatedUsd: providerResult.usage.estimatedCostUsd
+          estimatedUsd: providerResult.usage.estimatedCostUsd || 0
         },
         evaluation,
+        failure: null,
         failureReason: null,
+        lineage: {
+          ...current.lineage,
+          finalOutput: {
+            artifactId: outputArtifact.id,
+            checksum: outputChecksum,
+            sizeBytes: outputMeta.sizeBytes,
+            durationSec: outputMeta.durationSec,
+            width: outputMeta.width,
+            height: outputMeta.height,
+            contentType: "video/mp4",
+            sourceProviderUrl: providerResult.outputUrl
+          }
+        },
         updatedAt: nowIso(),
         completedAt: nowIso()
       }));
     } catch (error) {
+      const failure = buildFailure(error, providerState);
       await this.jobStore.updateRun(runId, (current) => ({
         ...current,
         state: "failed",
-        failureReason: error.message,
+        provider: {
+          ...current.provider,
+          status: providerState?.status || "failed",
+          runId: providerState?.providerRunId || current.provider?.runId || null,
+          modelId: providerState?.modelId || current.provider?.modelId || null,
+          completedAt: providerState?.completedAt || nowIso(),
+          lastPolledAt: providerState?.lastPolledAt || current.provider?.lastPolledAt || null,
+          pollCount: providerState?.pollCount || current.provider?.pollCount || 0
+        },
+        failure,
+        failureReason: failure.message,
         updatedAt: nowIso(),
         completedAt: nowIso()
       }));
@@ -273,5 +497,85 @@ export class AvatarService {
     const filePath = path.join(tempDir, `${Date.now()}-${filename}`);
     await fs.writeFile(filePath, buffer);
     return filePath;
+  }
+
+  async persistJsonArtifact(runId, { kind, filename, payload }) {
+    const buffer = Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    return this.persistBufferArtifact(runId, {
+      kind,
+      filename,
+      buffer,
+      contentType: "application/json",
+      metadata: {
+        contentType: "application/json"
+      }
+    });
+  }
+
+  async persistFileArtifact(runId, { kind, filename, sourcePath, contentType, metadata = {} }) {
+    const artifactId = createId("artifact");
+    const locator = await this.storageDriver.putFile(
+      `outputs/${runId}/${artifactId}${path.extname(filename)}`,
+      sourcePath,
+      contentType
+    );
+
+    const artifact = {
+      id: artifactId,
+      kind,
+      filename,
+      locator,
+      contentType,
+      createdAt: nowIso(),
+      metadata
+    };
+
+    await this.jobStore.updateRun(runId, (current) => ({
+      ...current,
+      artifacts: [...current.artifacts, artifact],
+      updatedAt: nowIso()
+    }));
+
+    return artifact;
+  }
+
+  async persistBufferArtifact(runId, { kind, filename, buffer, contentType, metadata = {} }) {
+    const artifactId = createId("artifact");
+    const locator = await this.storageDriver.putBuffer(
+      `outputs/${runId}/${artifactId}${path.extname(filename)}`,
+      buffer,
+      contentType
+    );
+
+    return {
+      id: artifactId,
+      kind,
+      filename,
+      locator,
+      contentType,
+      createdAt: nowIso(),
+      metadata: {
+        ...metadata,
+        sizeBytes: buffer.length
+      }
+    };
+  }
+
+  assertAssetMedia(kind, media) {
+    if (kind === "driving") {
+      if (!media.hasVideoStream) {
+        throw new Error("Driving media must contain a video stream.");
+      }
+      if (!media.sizeBytes || !media.width || !media.height) {
+        throw new Error("Driving video must have non-zero size and dimensions.");
+      }
+      if (!media.durationSec) {
+        throw new Error("Driving video must have non-zero duration.");
+      }
+      return;
+    }
+    if (!media.sizeBytes || !media.width || !media.height) {
+      throw new Error("Reference image must have non-zero size and dimensions.");
+    }
   }
 }

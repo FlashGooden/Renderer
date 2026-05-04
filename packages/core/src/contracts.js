@@ -1,6 +1,19 @@
 export const ASSET_KINDS = ["reference", "driving"];
 export const RUN_STATES = ["queued", "running", "needs_review", "succeeded", "failed"];
 export const REVIEW_DECISIONS = ["approve", "reject"];
+export const FAILURE_CODES = [
+  "provider_auth",
+  "provider_rate_limited",
+  "provider_timeout",
+  "provider_unavailable",
+  "provider_validation",
+  "provider_rejected_input",
+  "provider_run_failed",
+  "provider_canceled",
+  "provider_output_missing",
+  "provider_download_failed",
+  "provider_unknown"
+];
 
 export function assertAssetKind(kind) {
   if (!ASSET_KINDS.includes(kind)) {
@@ -20,6 +33,12 @@ export function assertReviewDecision(decision) {
   }
 }
 
+export function assertFailureCode(code) {
+  if (!FAILURE_CODES.includes(code)) {
+    throw new Error(`Unsupported failure code "${code}".`);
+  }
+}
+
 export function validateRunSpec(spec) {
   const required = ["referenceAssetId", "sourceVideoAssetId", "presetId"];
   for (const field of required) {
@@ -36,4 +55,3 @@ export function validateRunSpec(spec) {
     notes: spec.notes || ""
   };
 }
-

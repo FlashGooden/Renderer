@@ -6,20 +6,15 @@ import { createProviderRegistry } from "../../core/src/providers.js";
 import { readJsonRequest, readRequestBuffer, sendJson, sendText } from "../../core/src/http.js";
 import { AvatarService } from "../../core/src/service.js";
 
-export async function createRunnerServer(config) {
-  const jobStore = new FileJobStore(config.dataDir);
-  const storageDriver = createStorageDriver(config);
-  const providers = createProviderRegistry();
-  const service = new AvatarService({ config, jobStore, storageDriver, providers });
-  await service.initialize();
-
-  return http.createServer(async (request, response) => {
+export function createRunnerHandler({ service, storageDriver, providers }) {
+  return async (request, response) => {
     try {
       const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
 
       if (request.method === "GET" && url.pathname === "/health") {
         sendJson(response, 200, {
           ok: true,
+          defaultProvider: "replicate-dreamactor",
           providers: providers.list()
         });
         return;
@@ -66,7 +61,7 @@ export async function createRunnerServer(config) {
         const artifact = await service.getArtifact(artifactMatch[1], artifactMatch[2]);
         const buffer = await storageDriver.readBuffer(artifact.locator);
         response.writeHead(200, {
-          "content-type": "application/octet-stream",
+          "content-type": artifact.contentType || "application/octet-stream",
           "content-length": String(buffer.length),
           "content-disposition": `attachment; filename="${artifact.filename}"`
         });
@@ -80,7 +75,16 @@ export async function createRunnerServer(config) {
         error: error.message
       });
     }
-  });
+  };
+}
+
+export async function createRunnerServer(config, options = {}) {
+  const jobStore = new FileJobStore(config.dataDir);
+  const storageDriver = createStorageDriver(config);
+  const providers = options.providers || createProviderRegistry(config, options.providerOptions);
+  const service = new AvatarService({ config, jobStore, storageDriver, providers });
+  await service.initialize();
+  return http.createServer(createRunnerHandler({ service, storageDriver, providers }));
 }
 
 async function main() {
@@ -99,4 +103,3 @@ if (import.meta.url === entrypoint) {
     process.exitCode = 1;
   });
 }
-

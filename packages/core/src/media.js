@@ -7,11 +7,27 @@ import { ensureDir, sanitizeFilename } from "./fs-utils.js";
 
 const execFileAsync = promisify(execFile);
 
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
-const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".webm", ".m4v"]);
+export const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg"]);
+export const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".webm"]);
 
 export function getExtension(filename) {
   return path.extname(filename || "").toLowerCase();
+}
+
+export function contentTypeForExtension(extension) {
+  switch (extension) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".mov":
+      return "video/quicktime";
+    case ".webm":
+      return "video/webm";
+    default:
+      return "video/mp4";
+  }
 }
 
 export function assertSupportedFilename(kind, filename) {
@@ -38,6 +54,10 @@ export async function inspectMedia(filePath) {
   const payload = JSON.parse(stdout);
   const videoStream = payload.streams?.find((stream) => stream.codec_type === "video");
   const format = payload.format || {};
+  const formatNames = String(format.format_name || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
 
   return {
     durationSec: Number(format.duration || 0),
@@ -46,7 +66,9 @@ export async function inspectMedia(filePath) {
     height: Number(videoStream?.height || 0),
     codecName: videoStream?.codec_name || null,
     frameRate: parseFrameRate(videoStream?.avg_frame_rate),
-    formatName: format.format_name || null
+    formatName: format.format_name || null,
+    formatNames,
+    hasVideoStream: Boolean(videoStream)
   };
 }
 
@@ -69,3 +91,6 @@ export async function writeTempFile(prefix, filename, buffer) {
   return filePath;
 }
 
+export function createDataUrl(contentType, buffer) {
+  return `data:${contentType};base64,${buffer.toString("base64")}`;
+}
