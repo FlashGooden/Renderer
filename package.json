@@ -1,0 +1,15 @@
+{
+  "name": "renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "avatar": "node packages/cli/src/index.js",
+    "runner": "node packages/cloud-runner/src/server.js",
+    "test": "node --test packages/core/test/*.test.js packages/cloud-runner/test/*.test.js"
+  }
+}
+
