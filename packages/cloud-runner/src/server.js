@@ -46,6 +46,41 @@ export async function createRunnerServer(config) {
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/benchmark-datasets") {
+        const body = await readJsonRequest(request);
+        const dataset = await service.createBenchmarkDataset(body);
+        sendJson(response, 201, { dataset });
+        return;
+      }
+
+      const datasetMatch = url.pathname.match(/^\/benchmark-datasets\/([^/]+)$/);
+      if (request.method === "GET" && datasetMatch) {
+        const dataset = await service.getBenchmarkDataset(datasetMatch[1]);
+        sendJson(response, 200, { dataset });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/benchmark-run-groups") {
+        const body = await readJsonRequest(request);
+        const group = await service.createBenchmarkRunGroup(body);
+        sendJson(response, 201, { group });
+        return;
+      }
+
+      const groupMatch = url.pathname.match(/^\/benchmark-run-groups\/([^/]+)$/);
+      if (request.method === "GET" && groupMatch) {
+        const group = await service.getBenchmarkRunGroup(groupMatch[1]);
+        sendJson(response, 200, { group });
+        return;
+      }
+
+      const groupCompareMatch = url.pathname.match(/^\/benchmark-run-groups\/([^/]+)\/compare$/);
+      if (request.method === "GET" && groupCompareMatch) {
+        const comparison = await service.compareBenchmarkRunGroup(groupCompareMatch[1]);
+        sendJson(response, 200, { comparison });
+        return;
+      }
+
       const runMatch = url.pathname.match(/^\/runs\/([^/]+)$/);
       if (request.method === "GET" && runMatch) {
         const run = await service.getRun(runMatch[1]);
@@ -58,6 +93,14 @@ export async function createRunnerServer(config) {
         const body = await readJsonRequest(request);
         const run = await service.submitReview(reviewMatch[1], body);
         sendJson(response, 200, { run });
+        return;
+      }
+
+      const previewMatch = url.pathname.match(/^\/runs\/([^/]+)\/previews$/);
+      if (request.method === "POST" && previewMatch) {
+        const body = await readJsonRequest(request);
+        const artifacts = await service.generateRunPreviews(previewMatch[1], body);
+        sendJson(response, 200, { artifacts });
         return;
       }
 
@@ -99,4 +142,3 @@ if (import.meta.url === entrypoint) {
     process.exitCode = 1;
   });
 }
-
