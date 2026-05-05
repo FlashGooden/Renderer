@@ -46,13 +46,17 @@ export class AzureBlobStorageDriver {
     if (!baseUrl) {
       throw new Error("AVATAR_AZURE_BLOB_BASE_URL is required for azure-blob storage mode.");
     }
-    this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.baseUrl = baseUrl;
   }
 
   async initialize() {}
 
   buildUrl(relativePath) {
-    return `${this.baseUrl}/${relativePath.replace(/^\/+/, "")}`;
+    const url = new URL(this.baseUrl);
+    const cleanBasePath = url.pathname.replace(/\/+$/, "");
+    const cleanRelativePath = relativePath.replace(/^\/+/, "");
+    url.pathname = `${cleanBasePath}/${cleanRelativePath}`;
+    return url.toString();
   }
 
   async putBuffer(relativePath, buffer, contentType = "application/octet-stream") {
@@ -101,4 +105,3 @@ export function createStorageDriver(config) {
   }
   return new LocalStorageDriver(config.dataDir);
 }
-

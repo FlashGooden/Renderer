@@ -7,7 +7,12 @@ export const PRESETS = {
     height: 720,
     aspectRatio: "16:9",
     identityStrength: 0.8,
-    motionStrength: 0.75
+    motionStrength: 0.75,
+    providers: {
+      "replicate-dreamactor": {
+        cutFirstSecond: false
+      }
+    }
   },
   "vertical-720p": {
     id: "vertical-720p",
@@ -17,7 +22,12 @@ export const PRESETS = {
     height: 1280,
     aspectRatio: "9:16",
     identityStrength: 0.8,
-    motionStrength: 0.75
+    motionStrength: 0.75,
+    providers: {
+      "replicate-dreamactor": {
+        cutFirstSecond: false
+      }
+    }
   },
   "square-512": {
     id: "square-512",
@@ -27,7 +37,12 @@ export const PRESETS = {
     height: 512,
     aspectRatio: "1:1",
     identityStrength: 0.7,
-    motionStrength: 0.7
+    motionStrength: 0.7,
+    providers: {
+      "replicate-dreamactor": {
+        cutFirstSecond: false
+      }
+    }
   }
 };
 
@@ -38,4 +53,3 @@ export function getPreset(presetId) {
   }
   return preset;
 }
-

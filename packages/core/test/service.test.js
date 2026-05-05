@@ -6,36 +6,233 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { FileJobStore } from "../src/job-store.js";
-import { LocalStorageDriver } from "../src/storage.js";
-import { createProviderRegistry } from "../src/providers.js";
+import { createStorageDriver } from "../src/storage.js";
 import { AvatarService } from "../src/service.js";
+import { createProviderRegistry, ProviderError } from "../src/providers.js";
 
 const execFileAsync = promisify(execFile);
 
-async function createMediaFixtures(dir) {
+class FakeAsyncCopyProvider {
+  constructor({ id, displayName, modelId, outputUrl, estimatedCostUsd }) {
+    this.id = id;
+    this.displayName = displayName;
+    this.modelId = modelId;
+    this.outputUrl = outputUrl;
+    this.estimatedCostUsd = estimatedCostUsd;
+  }
+
+  validateRun() {}
+
+  async submitRun(context) {
+    this.sourceVideoPath = context.sourceVideoPath;
+    return {
+      providerRunId: `${this.id}_run_123`,
+      providerState: {
+        providerRunId: `${this.id}_run_123`,
+        modelId: this.modelId,
+        status: "starting",
+        createdAt: new Date().toISOString()
+      },
+      rawRequest: {
+        input: {
+          presetId: context.preset.id
+        }
+      },
+      rawResponse: {
+        id: `${this.id}_run_123`,
+        status: "starting"
+      }
+    };
+  }
+
+  async pollRun(state) {
+    this.pollCount = (this.pollCount || 0) + 1;
+    if (this.pollCount === 1) {
+      return {
+        providerState: {
+          ...state,
+          status: "processing",
+          startedAt: new Date().toISOString()
+        },
+        rawResponse: {
+          id: state.providerRunId,
+          status: "processing"
+        },
+        terminal: false
+      };
+    }
+
+    return {
+      providerState: {
+        ...state,
+        status: "succeeded",
+        completedAt: new Date().toISOString(),
+        output: this.outputUrl,
+        metrics: {
+          predict_time: 3.2,
+          total_time: 5.1
+        }
+      },
+      rawResponse: {
+        id: state.providerRunId,
+        status: "succeeded",
+        output: this.outputUrl
+      },
+      terminal: true
+    };
+  }
+
+  async cancelRun() {
+    return null;
+  }
+
+  normalizeTerminalState() {
+    return null;
+  }
+
+  async collectResult(state, { runId }) {
+    const outputPath = path.join(os.tmpdir(), "avatar-project", runId, `${this.id}-output.mp4`);
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.copyFile(this.sourceVideoPath, outputPath);
+    return {
+      outputPath,
+      outputUrl: state.output,
+      usage: {
+        estimatedCostUsd: this.estimatedCostUsd
+      }
+    };
+  }
+}
+
+class FakeTimeoutProvider {
+  constructor() {
+    this.id = "fake-timeout";
+    this.displayName = "Fake Timeout Provider";
+    this.modelId = "fake/timeout";
+  }
+
+  validateRun() {}
+
+  async submitRun() {
+    return {
+      providerRunId: "provider_timeout_123",
+      providerState: {
+        providerRunId: "provider_timeout_123",
+        modelId: this.modelId,
+        status: "starting",
+        createdAt: new Date().toISOString()
+      },
+      rawRequest: {
+        input: {}
+      },
+      rawResponse: {
+        id: "provider_timeout_123",
+        status: "starting"
+      }
+    };
+  }
+
+  async pollRun(state) {
+    return {
+      providerState: {
+        ...state,
+        status: "processing",
+        startedAt: state.startedAt || new Date().toISOString()
+      },
+      rawResponse: {
+        id: state.providerRunId,
+        status: "processing"
+      },
+      terminal: false
+    };
+  }
+
+  async cancelRun() {
+    return {
+      id: "provider_timeout_123",
+      status: "cancelled"
+    };
+  }
+
+  normalizeTerminalState() {
+    return null;
+  }
+
+  async collectResult() {
+    throw new Error("collectResult should not run for timeout paths");
+  }
+}
+
+class RemoteMemoryStorageDriver {
+  constructor(rootDir) {
+    this.rootDir = rootDir;
+    this.buffers = new Map();
+  }
+
+  async initialize() {
+    await fs.mkdir(this.rootDir, { recursive: true });
+  }
+
+  async putBuffer(relativePath, buffer) {
+    this.buffers.set(relativePath, Buffer.from(buffer));
+    return {
+      type: "azure-blob",
+      url: `https://example.invalid/${relativePath}`,
+      key: relativePath
+    };
+  }
+
+  async putFile(relativePath, sourcePath) {
+    const buffer = await fs.readFile(sourcePath);
+    return this.putBuffer(relativePath, buffer);
+  }
+
+  async readBuffer(locator) {
+    return Buffer.from(this.buffers.get(locator.key));
+  }
+}
+
+async function createMediaFixtures(dir, options = {}) {
   const referencePath = path.join(dir, "reference.png");
-  const sourcePath = path.join(dir, "source.mp4");
+  const sourcePath = path.join(dir, options.audioOnly ? "source-audio.mp4" : "source.mp4");
   const altSourcePath = path.join(dir, "source-alt.mp4");
+  const referenceSize = options.referenceSize || "512x512";
+  const videoSize = options.videoSize || "640x360";
+  const durationSec = options.durationSec || 2;
 
   await execFileAsync("ffmpeg", [
     "-y",
     "-f",
     "lavfi",
     "-i",
-    "color=c=salmon:s=512x512:d=1",
+    `color=c=salmon:s=${referenceSize}:d=1`,
     "-frames:v",
     "1",
     referencePath
   ]);
 
+  if (options.audioOnly) {
+    await execFileAsync("ffmpeg", [
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      `sine=frequency=880:duration=${durationSec}`,
+      "-c:a",
+      "aac",
+      sourcePath
+    ]);
+    return { referencePath, sourcePath };
+  }
+
   await execFileAsync("ffmpeg", [
     "-y",
     "-f",
     "lavfi",
     "-i",
-    "testsrc=size=640x360:rate=24",
+    `testsrc=size=${videoSize}:rate=24`,
     "-t",
-    "1",
+    String(durationSec),
     sourcePath
   ]);
 
@@ -44,34 +241,37 @@ async function createMediaFixtures(dir) {
     "-f",
     "lavfi",
     "-i",
-    "color=c=gray:s=640x360:r=24",
+    `color=c=gray:s=${videoSize}:r=24`,
     "-t",
-    "1",
+    String(durationSec),
     altSourcePath
   ]);
 
   return { referencePath, sourcePath, altSourcePath };
 }
 
-async function createService(rootDir) {
+async function createTestService({ providers, configOverrides = {}, storageDriver = null }) {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-service-"));
   const config = {
     runnerPort: 0,
     runnerUrl: "http://127.0.0.1:0",
     dataDir: path.join(rootDir, ".avatar"),
     storageMode: "local",
-    azureBlobBaseUrl: ""
+    azureBlobBaseUrl: "",
+    replicateApiToken: "test-token",
+    replicateModel: "bytedance/dreamactor-m2.0",
+    providerTimeoutSec: 1,
+    providerPollIntervalMs: 5,
+    ...configOverrides
   };
-  const service = new AvatarService({
-    config,
-    jobStore: new FileJobStore(config.dataDir),
-    storageDriver: new LocalStorageDriver(config.dataDir),
-    providers: createProviderRegistry()
-  });
+  const jobStore = new FileJobStore(config.dataDir);
+  const resolvedStorageDriver = storageDriver || createStorageDriver(config);
+  const service = new AvatarService({ config, jobStore, storageDriver: resolvedStorageDriver, providers });
   await service.initialize();
-  return service;
+  return { rootDir, config, service, storageDriver: resolvedStorageDriver };
 }
 
-async function registerAsset(service, filePath, kind) {
+async function uploadAsset(service, filePath, kind) {
   const buffer = await fs.readFile(filePath);
   return service.registerAsset({
     kind,
@@ -80,24 +280,251 @@ async function registerAsset(service, filePath, kind) {
   });
 }
 
-async function waitForRun(service, runId) {
-  for (let attempt = 0; attempt < 180; attempt += 1) {
+async function waitForTerminalRun(service, runId, timeoutMs = 18000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
     const run = await service.getRun(runId);
     if (!["queued", "running"].includes(run.state)) {
       return run;
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`Timed out waiting for run ${runId}`);
+  throw new Error(`Run ${runId} did not complete within ${timeoutMs}ms`);
 }
 
-test("service persists benchmark entities, review history, previews, and compare summaries", async () => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-service-"));
-  const service = await createService(rootDir);
+test("AvatarService persists provider lineage and final output metadata for async runs", async () => {
+  const provider = new FakeAsyncCopyProvider({
+    id: "fake-success",
+    displayName: "Fake Success Provider",
+    modelId: "fake/success",
+    outputUrl: "https://replicate.delivery/fake-output.mp4",
+    estimatedCostUsd: 0.42
+  });
+  const providers = {
+    get(providerId) {
+      if (providerId !== provider.id) {
+        throw new Error(`Unknown provider ${providerId}`);
+      }
+      return provider;
+    },
+    list() {
+      return [provider.id];
+    }
+  };
+  const { rootDir, service } = await createTestService({ providers });
   const { referencePath, sourcePath } = await createMediaFixtures(rootDir);
+  const referenceAsset = await uploadAsset(service, referencePath, "reference");
+  const sourceAsset = await uploadAsset(service, sourcePath, "driving");
 
-  const referenceAsset = await registerAsset(service, referencePath, "reference");
-  const sourceAsset = await registerAsset(service, sourcePath, "driving");
+  const run = await service.createRun({
+    providerId: provider.id,
+    spec: {
+      referenceAssetId: referenceAsset.id,
+      sourceVideoAssetId: sourceAsset.id,
+      presetId: "preview-720p"
+    }
+  });
+
+  const completed = await waitForTerminalRun(service, run.id);
+  assert.equal(completed.state, "needs_review");
+  assert.equal(completed.provider.runId, "fake-success_run_123");
+  assert.equal(completed.provider.status, "succeeded");
+  assert.equal(completed.lineage.providerPayloads.submitRequestArtifactId !== null, true);
+  assert.equal(completed.lineage.providerPayloads.submitResponseArtifactId !== null, true);
+  assert.equal(completed.lineage.providerPayloads.pollArtifactIds.length >= 2, true);
+  assert.equal(completed.lineage.providerPayloads.terminalArtifactId !== null, true);
+  assert.equal(completed.lineage.finalOutput.contentType, "video/mp4");
+  assert.equal(completed.lineage.finalOutput.sourceProviderUrl, "https://replicate.delivery/fake-output.mp4");
+  assert.equal(completed.lineage.finalOutput.durationSec > 0, true);
+  assert.equal(completed.cost.estimatedUsd, 0.42);
+  assert.equal(completed.evaluation.outputValid, true);
+
+  const outputArtifact = completed.artifacts.find((artifact) => artifact.kind === "retargeted_video");
+  assert.equal(Boolean(outputArtifact), true);
+  assert.equal(outputArtifact.metadata.width > 0, true);
+  assert.equal(outputArtifact.metadata.height > 0, true);
+  assert.equal(typeof outputArtifact.metadata.checksum, "string");
+});
+
+test("AvatarService records timeout failures and cancel lineage", async () => {
+  const provider = new FakeTimeoutProvider();
+  const providers = {
+    get(providerId) {
+      if (providerId !== provider.id) {
+        throw new Error(`Unknown provider ${providerId}`);
+      }
+      return provider;
+    },
+    list() {
+      return [provider.id];
+    }
+  };
+  const { rootDir, service } = await createTestService({
+    providers,
+    configOverrides: {
+      providerTimeoutSec: 0.05,
+      providerPollIntervalMs: 5
+    }
+  });
+  const { referencePath, sourcePath } = await createMediaFixtures(rootDir);
+  const referenceAsset = await uploadAsset(service, referencePath, "reference");
+  const sourceAsset = await uploadAsset(service, sourcePath, "driving");
+
+  const run = await service.createRun({
+    providerId: provider.id,
+    spec: {
+      referenceAssetId: referenceAsset.id,
+      sourceVideoAssetId: sourceAsset.id,
+      presetId: "preview-720p"
+    }
+  });
+
+  const completed = await waitForTerminalRun(service, run.id);
+  assert.equal(completed.state, "failed");
+  assert.equal(completed.failure.code, "provider_timeout");
+  assert.equal(completed.lineage.providerPayloads.cancelArtifactId !== null, true);
+});
+
+test("AvatarService cleans up materialized temp media for remote locators", async () => {
+  const provider = new FakeAsyncCopyProvider({
+    id: "fake-remote-success",
+    displayName: "Fake Remote Success Provider",
+    modelId: "fake/remote-success",
+    outputUrl: "https://replicate.delivery/remote-output.mp4",
+    estimatedCostUsd: 0.22
+  });
+  const providers = {
+    get(providerId) {
+      if (providerId !== provider.id) {
+        throw new Error(`Unknown provider ${providerId}`);
+      }
+      return provider;
+    },
+    list() {
+      return [provider.id];
+    }
+  };
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-remote-storage-"));
+  const remoteStorageDriver = new RemoteMemoryStorageDriver(tempDir);
+  const { rootDir, service } = await createTestService({
+    providers,
+    storageDriver: remoteStorageDriver
+  });
+  const { referencePath, sourcePath } = await createMediaFixtures(rootDir);
+  const referenceAsset = await uploadAsset(service, referencePath, "reference");
+  const sourceAsset = await uploadAsset(service, sourcePath, "driving");
+
+  const run = await service.createRun({
+    providerId: provider.id,
+    spec: {
+      referenceAssetId: referenceAsset.id,
+      sourceVideoAssetId: sourceAsset.id,
+      presetId: "preview-720p"
+    }
+  });
+
+  const completed = await waitForTerminalRun(service, run.id);
+  assert.equal(completed.state, "needs_review");
+
+  const materializedDir = path.join(os.tmpdir(), "avatar-project", "materialized");
+  const remainingFiles = await fs.readdir(materializedDir).catch(() => []);
+  const leakedFiles = remainingFiles.filter(
+    (name) => name.includes(referenceAsset.id) || name.includes(sourceAsset.id)
+  );
+  assert.deepEqual(leakedFiles, []);
+});
+
+test("AvatarService validates Replicate provider constraints at run creation", async () => {
+  const providers = createProviderRegistry({
+    replicateApiToken: "test-token",
+    replicateModel: "bytedance/dreamactor-m2.0",
+    providerTimeoutSec: 600,
+    providerPollIntervalMs: 5
+  });
+  const { rootDir, service } = await createTestService({ providers });
+  const { referencePath, sourcePath } = await createMediaFixtures(rootDir, {
+    referenceSize: "320x240",
+    durationSec: 12
+  });
+  const referenceAsset = await uploadAsset(service, referencePath, "reference");
+  const sourceAsset = await uploadAsset(service, sourcePath, "driving");
+
+  await assert.rejects(
+    () =>
+      service.createRun({
+        providerId: "replicate-dreamactor",
+        spec: {
+          referenceAssetId: referenceAsset.id,
+          sourceVideoAssetId: sourceAsset.id,
+          presetId: "preview-720p"
+        }
+      }),
+    (error) => error instanceof ProviderError && error.code === "provider_validation"
+  );
+});
+
+test("AvatarService rejects unsupported edge-case media at upload time", async () => {
+  const providers = createProviderRegistry({
+    replicateApiToken: "test-token",
+    replicateModel: "bytedance/dreamactor-m2.0",
+    providerTimeoutSec: 600,
+    providerPollIntervalMs: 5
+  });
+  const { rootDir, service } = await createTestService({ providers });
+  const { sourcePath } = await createMediaFixtures(rootDir, {
+    audioOnly: true
+  });
+
+  await assert.rejects(
+    () => uploadAsset(service, sourcePath, "driving"),
+    /Driving media must contain a video stream/
+  );
+
+  const webpPath = path.join(rootDir, "reference.webp");
+  await fs.writeFile(webpPath, "not-a-real-webp");
+  await assert.rejects(
+    () => uploadAsset(service, webpPath, "reference"),
+    /Reference images must use one of/
+  );
+});
+
+test("AvatarService persists benchmark entities, review history, previews, and compare summaries", async () => {
+  const primaryProvider = new FakeAsyncCopyProvider({
+    id: "fake-benchmark-primary",
+    displayName: "Fake Benchmark Primary",
+    modelId: "fake/benchmark-primary",
+    outputUrl: "https://replicate.delivery/benchmark-primary.mp4",
+    estimatedCostUsd: 0.18
+  });
+  const fallbackProvider = new FakeAsyncCopyProvider({
+    id: "fake-benchmark-fallback",
+    displayName: "Fake Benchmark Fallback",
+    modelId: "fake/benchmark-fallback",
+    outputUrl: "https://replicate.delivery/benchmark-fallback.mp4",
+    estimatedCostUsd: 0.12
+  });
+  const providers = {
+    get(providerId) {
+      if (providerId === primaryProvider.id) {
+        return primaryProvider;
+      }
+      if (providerId === fallbackProvider.id) {
+        return fallbackProvider;
+      }
+      throw new Error(`Unknown provider ${providerId}`);
+    },
+    list() {
+      return [primaryProvider.id, fallbackProvider.id];
+    }
+  };
+  const { rootDir, service } = await createTestService({ providers });
+  const { referencePath, sourcePath } = await createMediaFixtures(rootDir, {
+    videoSize: "320x240",
+    durationSec: 1
+  });
+
+  const referenceAsset = await uploadAsset(service, referencePath, "reference");
+  const sourceAsset = await uploadAsset(service, sourcePath, "driving");
   const dataset = await service.createBenchmarkDataset({
     label: "smoke dataset",
     cases: [
@@ -116,7 +543,7 @@ test("service persists benchmark entities, review history, previews, and compare
   });
 
   const primaryRun = await service.createRun({
-    providerId: "mock-primary",
+    providerId: primaryProvider.id,
     spec: {
       referenceAssetId: referenceAsset.id,
       sourceVideoAssetId: sourceAsset.id,
@@ -128,7 +555,7 @@ test("service persists benchmark entities, review history, previews, and compare
     }
   });
   const fallbackRun = await service.createRun({
-    providerId: "mock-fallback",
+    providerId: fallbackProvider.id,
     spec: {
       referenceAssetId: referenceAsset.id,
       sourceVideoAssetId: sourceAsset.id,
@@ -140,8 +567,8 @@ test("service persists benchmark entities, review history, previews, and compare
     }
   });
 
-  const reviewedCandidate = await waitForRun(service, primaryRun.id);
-  await waitForRun(service, fallbackRun.id);
+  const reviewedCandidate = await waitForTerminalRun(service, primaryRun.id);
+  await waitForTerminalRun(service, fallbackRun.id);
   assert.equal(reviewedCandidate.state, "needs_review");
 
   await service.submitReview(primaryRun.id, {
@@ -188,17 +615,37 @@ test("service persists benchmark entities, review history, previews, and compare
   assert.equal(storedGroup.members.length, 2);
 });
 
-test("service rejects invalid review tags and mismatched compares", async () => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-service-"));
-  const service = await createService(rootDir);
-  const { referencePath, sourcePath, altSourcePath } = await createMediaFixtures(rootDir);
+test("AvatarService rejects invalid review tags and mismatched compares", async () => {
+  const provider = new FakeAsyncCopyProvider({
+    id: "fake-compare-provider",
+    displayName: "Fake Compare Provider",
+    modelId: "fake/compare-provider",
+    outputUrl: "https://replicate.delivery/compare-output.mp4",
+    estimatedCostUsd: 0.1
+  });
+  const providers = {
+    get(providerId) {
+      if (providerId !== provider.id) {
+        throw new Error(`Unknown provider ${providerId}`);
+      }
+      return provider;
+    },
+    list() {
+      return [provider.id];
+    }
+  };
+  const { rootDir, service } = await createTestService({ providers });
+  const { referencePath, sourcePath, altSourcePath } = await createMediaFixtures(rootDir, {
+    videoSize: "320x240",
+    durationSec: 1
+  });
 
-  const referenceAsset = await registerAsset(service, referencePath, "reference");
-  const sourceAsset = await registerAsset(service, sourcePath, "driving");
-  const altSourceAsset = await registerAsset(service, altSourcePath, "driving");
+  const referenceAsset = await uploadAsset(service, referencePath, "reference");
+  const sourceAsset = await uploadAsset(service, sourcePath, "driving");
+  const altSourceAsset = await uploadAsset(service, altSourcePath, "driving");
 
   const runA = await service.createRun({
-    providerId: "mock-primary",
+    providerId: provider.id,
     spec: {
       referenceAssetId: referenceAsset.id,
       sourceVideoAssetId: sourceAsset.id,
@@ -206,7 +653,7 @@ test("service rejects invalid review tags and mismatched compares", async () => 
     }
   });
   const runB = await service.createRun({
-    providerId: "mock-primary",
+    providerId: provider.id,
     spec: {
       referenceAssetId: referenceAsset.id,
       sourceVideoAssetId: altSourceAsset.id,
@@ -214,8 +661,8 @@ test("service rejects invalid review tags and mismatched compares", async () => 
     }
   });
 
-  await waitForRun(service, runA.id);
-  await waitForRun(service, runB.id);
+  await waitForTerminalRun(service, runA.id);
+  await waitForTerminalRun(service, runB.id);
 
   await assert.rejects(
     () =>

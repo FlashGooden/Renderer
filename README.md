@@ -6,7 +6,7 @@ CLI-first personal tooling for short avatar motion-retargeting experiments. The 
 - `packages/cloud-runner`: a minimal HTTP runner that can run locally or be deployed to Azure-hosted compute
 - `packages/core`: contracts, storage, evaluation, presets, provider adapters, and persistence
 
-The default provider implementation is intentionally offline-friendly. It mirrors the driving video into a preset-shaped output clip so the full orchestration path is testable before you wire in real motion-generation APIs.
+The default provider implementation targets Replicate DreamActor M2.0 through the async Predictions API. A mock provider remains available only for tests and offline fixtures.
 
 ## Quick Start
 
@@ -58,6 +58,10 @@ Configuration is read from environment variables and optionally from `avatar.con
 - `AVATAR_DATA_DIR`: default `<repo>/.avatar`
 - `AVATAR_STORAGE_MODE`: `local` or `azure-blob`
 - `AVATAR_AZURE_BLOB_BASE_URL`: container URL with SAS token for PUT/GET operations when `azure-blob` mode is used
+- `AVATAR_REPLICATE_API_TOKEN`: bearer token for Replicate API access
+- `AVATAR_REPLICATE_MODEL`: default `bytedance/dreamactor-m2.0`
+- `AVATAR_PROVIDER_TIMEOUT_SEC`: default `600`
+- `AVATAR_PROVIDER_POLL_INTERVAL_MS`: default `2000`
 
 ### Example `avatar.config.json`
 
@@ -66,7 +70,11 @@ Configuration is read from environment variables and optionally from `avatar.con
   "runnerUrl": "http://127.0.0.1:4010",
   "dataDir": ".avatar",
   "storageMode": "local",
-  "azureBlobBaseUrl": ""
+  "azureBlobBaseUrl": "",
+  "replicateApiToken": "",
+  "replicateModel": "bytedance/dreamactor-m2.0",
+  "providerTimeoutSec": 600,
+  "providerPollIntervalMs": 2000
 }
 ```
 
@@ -81,9 +89,8 @@ The current runner is intentionally small:
 ## Commands
 
 - `avatar upload <file> --kind reference|driving`
-- `avatar run --reference <asset-id> --video <asset-id> [--preset preview-720p] [--provider mock-primary]`
+- `avatar run --reference <asset-id> --video <asset-id> [--preset preview-720p] [--provider replicate-dreamactor]`
 - `avatar status <run-id> [--json]`
 - `avatar fetch <run-id> [--output-dir ./outputs]`
 - `avatar review <run-id> --decision approve|reject [--notes "..."] [--tag quality]`
 - `avatar compare <run-id-a> <run-id-b> [--json]`
-

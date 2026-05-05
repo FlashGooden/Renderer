@@ -16,6 +16,19 @@ export const REVIEW_TAGS = [
   "needs_followup"
 ];
 export const ARTIFACT_KINDS = ["retargeted_video", "preview_still", "contact_sheet"];
+export const FAILURE_CODES = [
+  "provider_auth",
+  "provider_rate_limited",
+  "provider_timeout",
+  "provider_unavailable",
+  "provider_validation",
+  "provider_rejected_input",
+  "provider_run_failed",
+  "provider_canceled",
+  "provider_output_missing",
+  "provider_download_failed",
+  "provider_unknown"
+];
 
 export function assertAssetKind(kind) {
   if (!ASSET_KINDS.includes(kind)) {
@@ -135,6 +148,12 @@ export function validateBenchmarkRunGroupInput(input = {}) {
     benchmarkDatasetId: input.benchmarkDatasetId,
     candidateLabels
   };
+}
+
+export function assertFailureCode(code) {
+  if (!FAILURE_CODES.includes(code)) {
+    throw new Error(`Unsupported failure code "${code}".`);
+  }
 }
 
 export function validateRunSpec(spec) {
