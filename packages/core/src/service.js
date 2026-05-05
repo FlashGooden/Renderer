@@ -2,7 +2,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
-import { assertAssetKind, assertReviewDecision, validateRunSpec } from "./contracts.js";
+import {
+  assertAssetKind,
+  assertArtifactKind,
+  validateBenchmarkDatasetInput,
+  validateBenchmarkRunGroupInput,
+  validateReviewInput,
+  validateRunSpec
+} from "./contracts.js";
+import { compareBenchmarkRunGroup, compareRuns } from "./compare.js";
 import { createId, sha256 } from "./ids.js";
 import {
   assertSupportedFilename,
@@ -13,6 +21,7 @@ import {
 } from "./media.js";
 import { getPreset } from "./presets.js";
 import { evaluateRun } from "./evaluation.js";
+import { generateContactSheet, generatePreviewStill } from "./previews.js";
 import { normalizeReplicateFailure, ProviderError } from "./providers.js";
 
 function nowIso() {
@@ -52,6 +61,31 @@ function buildFailure(error, providerState = null) {
   return normalizeReplicateFailure(error, {
     providerStatus: providerState?.status || null
   });
+}
+
+function deriveLatestReview(reviewHistory) {
+  if (!reviewHistory.length) {
+    return null;
+  }
+  return reviewHistory[reviewHistory.length - 1];
+}
+
+function hydrateRunReview(run, reviewHistory) {
+  return {
+    ...run,
+    reviewHistory,
+    latestReview: deriveLatestReview(reviewHistory)
+  };
+}
+
+function buildArtifactFilename(runId, kind) {
+  if (kind === "preview_still") {
+    return `${runId}-preview-still.png`;
+  }
+  if (kind === "contact_sheet") {
+    return `${runId}-contact-sheet.png`;
+  }
+  return `${runId}.mp4`;
 }
 
 export class AvatarService {
@@ -106,6 +140,82 @@ export class AvatarService {
     return asset;
   }
 
+  async createBenchmarkDataset(input) {
+    const validated = validateBenchmarkDatasetInput(input);
+    const createdAt = nowIso();
+    const cases = [];
+
+    for (const benchmarkCase of validated.cases) {
+      const [referenceAsset, sourceAsset] = await Promise.all([
+        this.jobStore.getAsset(benchmarkCase.referenceAssetId),
+        this.jobStore.getAsset(benchmarkCase.sourceVideoAssetId)
+      ]);
+      if (!referenceAsset) {
+        throw new Error(`Reference asset "${benchmarkCase.referenceAssetId}" was not found.`);
+      }
+      if (!sourceAsset) {
+        throw new Error(`Driving asset "${benchmarkCase.sourceVideoAssetId}" was not found.`);
+      }
+      cases.push({
+        ...benchmarkCase,
+        id: benchmarkCase.id || createId("benchmark_case")
+      });
+    }
+
+    const dataset = {
+      id: createId("benchmark_dataset"),
+      label: validated.label,
+      notes: validated.notes,
+      cases,
+      createdAt,
+      updatedAt: createdAt
+    };
+
+    return this.jobStore.createBenchmarkDataset(dataset);
+  }
+
+  async getBenchmarkDataset(datasetId) {
+    const dataset = await this.jobStore.getBenchmarkDataset(datasetId);
+    if (!dataset) {
+      throw new Error(`Benchmark dataset "${datasetId}" was not found.`);
+    }
+    return dataset;
+  }
+
+  async createBenchmarkRunGroup(input) {
+    const validated = validateBenchmarkRunGroupInput(input);
+    await this.getBenchmarkDataset(validated.benchmarkDatasetId);
+
+    const createdAt = nowIso();
+    const group = {
+      id: createId("benchmark_group"),
+      label: validated.label,
+      notes: validated.notes,
+      benchmarkDatasetId: validated.benchmarkDatasetId,
+      candidateLabels: validated.candidateLabels,
+      members: [],
+      createdAt,
+      updatedAt: createdAt
+    };
+
+    return this.jobStore.createBenchmarkRunGroup(group);
+  }
+
+  async getBenchmarkRunGroup(groupId) {
+    const group = await this.jobStore.getBenchmarkRunGroup(groupId);
+    if (!group) {
+      throw new Error(`Benchmark run group "${groupId}" was not found.`);
+    }
+    return group;
+  }
+
+  async compareBenchmarkRunGroup(groupId) {
+    const group = await this.getBenchmarkRunGroup(groupId);
+    const dataset = await this.getBenchmarkDataset(group.benchmarkDatasetId);
+    const runs = await Promise.all((group.members || []).map((member) => this.getRun(member.runId)));
+    return compareBenchmarkRunGroup(group, dataset, runs);
+  }
+
   async createRun({ providerId = "replicate-dreamactor", spec }) {
     const validatedSpec = validateRunSpec(spec);
     const [referenceAsset, sourceAsset] = await Promise.all([
@@ -118,6 +228,38 @@ export class AvatarService {
     }
     if (!sourceAsset) {
       throw new Error(`Driving asset "${validatedSpec.sourceVideoAssetId}" was not found.`);
+    }
+
+    let benchmarkDataset = null;
+    let benchmarkRunGroup = null;
+    let benchmarkCase = null;
+    if (validatedSpec.benchmarkDatasetId) {
+      benchmarkDataset = await this.getBenchmarkDataset(validatedSpec.benchmarkDatasetId);
+    }
+    if (validatedSpec.benchmarkRunGroupId) {
+      benchmarkRunGroup = await this.getBenchmarkRunGroup(validatedSpec.benchmarkRunGroupId);
+      if (!validatedSpec.candidateLabel) {
+        throw new Error("benchmarkRunGroupId requires candidateLabel.");
+      }
+      if (benchmarkDataset && benchmarkRunGroup.benchmarkDatasetId !== benchmarkDataset.id) {
+        throw new Error("Benchmark run group and dataset do not match.");
+      }
+      benchmarkDataset = benchmarkDataset || (await this.getBenchmarkDataset(benchmarkRunGroup.benchmarkDatasetId));
+    }
+    if (validatedSpec.benchmarkCaseId) {
+      if (!benchmarkDataset) {
+        throw new Error("benchmarkCaseId requires a matching benchmarkDatasetId or benchmarkRunGroupId.");
+      }
+      benchmarkCase = benchmarkDataset.cases.find((item) => item.id === validatedSpec.benchmarkCaseId) || null;
+      if (!benchmarkCase) {
+        throw new Error(`Benchmark case "${validatedSpec.benchmarkCaseId}" was not found.`);
+      }
+      if (
+        benchmarkCase.referenceAssetId !== validatedSpec.referenceAssetId ||
+        benchmarkCase.sourceVideoAssetId !== validatedSpec.sourceVideoAssetId
+      ) {
+        throw new Error("Run inputs do not match the selected benchmark case.");
+      }
     }
 
     const preset = getPreset(validatedSpec.presetId);
@@ -137,6 +279,10 @@ export class AvatarService {
       notes: validatedSpec.notes,
       referenceAssetId: referenceAsset.id,
       sourceVideoAssetId: sourceAsset.id,
+      benchmarkDatasetId: benchmarkDataset?.id || null,
+      benchmarkCaseId: benchmarkCase?.id || validatedSpec.benchmarkCaseId || null,
+      benchmarkRunGroupId: benchmarkRunGroup?.id || null,
+      candidateLabel: validatedSpec.candidateLabel || "",
       artifacts: [],
       attempts: 0,
       cost: {
@@ -166,6 +312,22 @@ export class AvatarService {
     };
 
     await this.jobStore.createRun(run);
+    if (benchmarkRunGroup) {
+      await this.jobStore.updateBenchmarkRunGroup(benchmarkRunGroup.id, (current) => ({
+        ...current,
+        candidateLabels: [...new Set([...current.candidateLabels, run.candidateLabel])],
+        members: [
+          ...current.members.filter((item) => item.runId !== run.id),
+          {
+            runId: run.id,
+            benchmarkCaseId: run.benchmarkCaseId,
+            candidateLabel: run.candidateLabel
+          }
+        ],
+        updatedAt: nowIso()
+      }));
+    }
+
     setImmediate(() => {
       this.executeRun(runId).catch((error) => {
         console.error(`Run ${runId} failed:`, error);
@@ -181,15 +343,12 @@ export class AvatarService {
       throw new Error(`Run "${runId}" was not found.`);
     }
 
-    const review = await this.jobStore.getReview(runId);
-    return {
-      ...run,
-      review
-    };
+    const reviewHistory = await this.jobStore.getReviewHistory(runId);
+    return hydrateRunReview(run, reviewHistory);
   }
 
-  async submitReview(runId, { decision, notes = "", tags = [] }) {
-    assertReviewDecision(decision);
+  async submitReview(runId, input = {}) {
+    const validated = validateReviewInput(input);
     const run = await this.getRun(runId);
 
     if (!["needs_review", "succeeded", "failed"].includes(run.state)) {
@@ -197,35 +356,52 @@ export class AvatarService {
     }
 
     const reviewedAt = nowIso();
-    const review = {
+    const reviewEntry = {
       runId,
-      decision,
-      notes,
-      tags,
+      reviewer: validated.reviewer,
+      decision: validated.decision,
+      notes: validated.notes,
+      tags: validated.tags,
+      criteria: validated.criteria,
       reviewedAt
     };
 
-    await this.jobStore.saveReview(runId, review);
-    const nextState = decision === "approve" ? "succeeded" : "failed";
-    const failure = decision === "reject"
-      ? {
-          code: "provider_unknown",
-          message: "Rejected during manual review.",
-          retryable: false,
-          providerStatus: null,
-          details: {}
-        }
-      : null;
+    const reviewHistory = await this.jobStore.appendReview(runId, reviewEntry);
+    const nextFields = {
+      updatedAt: reviewedAt
+    };
 
-    return this.jobStore.updateRun(runId, (current) => ({
+    if (validated.decision === "approve") {
+      nextFields.state = "succeeded";
+      nextFields.reviewStatus = "approved";
+      nextFields.failure = null;
+      nextFields.failureReason = null;
+      nextFields.completedAt = run.completedAt || reviewedAt;
+    } else if (validated.decision === "reject") {
+      nextFields.state = "failed";
+      nextFields.reviewStatus = "rejected";
+      nextFields.failure = {
+        code: "provider_unknown",
+        message: "Rejected during manual review.",
+        retryable: false,
+        providerStatus: null,
+        details: {}
+      };
+      nextFields.failureReason = nextFields.failure.message;
+      nextFields.completedAt = run.completedAt || reviewedAt;
+    }
+
+    const updatedRun = await this.jobStore.updateRun(runId, (current) => ({
       ...current,
-      state: nextState,
-      reviewStatus: decision === "approve" ? "approved" : "rejected",
-      failure,
-      failureReason: failure?.message || null,
-      updatedAt: reviewedAt,
-      completedAt: current.completedAt || reviewedAt
+      ...nextFields
     }));
+
+    return hydrateRunReview(updatedRun, reviewHistory);
+  }
+
+  async compareRuns(runAId, runBId) {
+    const [leftRun, rightRun] = await Promise.all([this.getRun(runAId), this.getRun(runBId)]);
+    return compareRuns(leftRun, rightRun);
   }
 
   async getArtifact(runId, artifactId) {
@@ -235,6 +411,76 @@ export class AvatarService {
       throw new Error(`Artifact "${artifactId}" was not found for run "${runId}".`);
     }
     return artifact;
+  }
+
+  async generateRunPreviews(runId, { kinds = ["preview_still", "contact_sheet"] } = {}) {
+    const run = await this.getRun(runId);
+    const outputArtifact = run.artifacts.find((item) => item.kind === "retargeted_video");
+    if (!outputArtifact) {
+      throw new Error(`Run "${runId}" does not have a retargeted video artifact yet.`);
+    }
+
+    for (const kind of kinds) {
+      assertArtifactKind(kind);
+      if (!["preview_still", "contact_sheet"].includes(kind)) {
+        throw new Error(`Artifact kind "${kind}" is not preview-generatable.`);
+      }
+    }
+
+    const existingArtifacts = run.artifacts.filter((artifact) => kinds.includes(artifact.kind));
+    if (existingArtifacts.length === kinds.length) {
+      return existingArtifacts;
+    }
+
+    const materializedPaths = [];
+    try {
+      const videoPath = await this.materializeLocator(outputArtifact.locator, outputArtifact.filename, materializedPaths);
+      const outputMeta = await inspectMedia(videoPath);
+      const tempDir = path.join(os.tmpdir(), "avatar-project", runId, "previews");
+      await fs.mkdir(tempDir, { recursive: true });
+
+      const createdArtifacts = [];
+      for (const kind of kinds) {
+        const existing = run.artifacts.find((artifact) => artifact.kind === kind);
+        if (existing) {
+          createdArtifacts.push(existing);
+          continue;
+        }
+
+        const filename = buildArtifactFilename(run.id, kind);
+        const outputPath = path.join(tempDir, filename);
+
+        if (kind === "preview_still") {
+          await generatePreviewStill({
+            videoPath,
+            outputPath,
+            timeSec: Math.max(outputMeta.durationSec / 2, 0)
+          });
+        } else {
+          await generateContactSheet({
+            videoPath,
+            outputPath,
+            durationSec: outputMeta.durationSec
+          });
+        }
+
+        createdArtifacts.push(
+          await this.persistFileArtifact(run.id, {
+            kind,
+            filename,
+            sourcePath: outputPath,
+            contentType: "image/png",
+            metadata: {
+              sourceArtifactId: outputArtifact.id
+            }
+          })
+        );
+      }
+
+      return createdArtifacts;
+    } finally {
+      await this.cleanupMaterializedFiles(materializedPaths);
+    }
   }
 
   async executeRun(runId) {
@@ -319,9 +565,8 @@ export class AvatarService {
       while (true) {
         if (Date.now() - pollStart >= this.config.providerTimeoutSec * 1000) {
           const cancelPayload = await provider.cancelRun(providerState).catch(() => null);
-          let cancelArtifact = null;
           if (cancelPayload) {
-            cancelArtifact = await this.persistJsonArtifact(runId, {
+            const cancelArtifact = await this.persistJsonArtifact(runId, {
               kind: "provider_cancel_response",
               filename: `${runId}-provider-cancel-response.json`,
               payload: cancelPayload
@@ -425,6 +670,7 @@ export class AvatarService {
       await this.jobStore.updateRun(runId, (current) => ({
         ...current,
         state: "needs_review",
+        reviewStatus: current.reviewStatus === "approved" ? "approved" : "pending",
         provider: buildProviderSnapshot(provider, providerState),
         artifacts: current.artifacts.map((artifact) =>
           artifact.id === outputArtifact.id
@@ -503,11 +749,7 @@ export class AvatarService {
   }
 
   async cleanupMaterializedFiles(filePaths) {
-    await Promise.all(
-      filePaths.map((filePath) =>
-        fs.rm(filePath, { force: true }).catch(() => {})
-      )
-    );
+    await Promise.all(filePaths.map((filePath) => fs.rm(filePath, { force: true }).catch(() => {})));
   }
 
   async persistJsonArtifact(runId, { kind, filename, payload }) {
