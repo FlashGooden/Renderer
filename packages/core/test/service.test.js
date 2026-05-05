@@ -161,6 +161,35 @@ class FakeTimeoutProvider {
   }
 }
 
+class RemoteMemoryStorageDriver {
+  constructor(rootDir) {
+    this.rootDir = rootDir;
+    this.buffers = new Map();
+  }
+
+  async initialize() {
+    await fs.mkdir(this.rootDir, { recursive: true });
+  }
+
+  async putBuffer(relativePath, buffer) {
+    this.buffers.set(relativePath, Buffer.from(buffer));
+    return {
+      type: "azure-blob",
+      url: `https://example.invalid/${relativePath}`,
+      key: relativePath
+    };
+  }
+
+  async putFile(relativePath, sourcePath) {
+    const buffer = await fs.readFile(sourcePath);
+    return this.putBuffer(relativePath, buffer);
+  }
+
+  async readBuffer(locator) {
+    return Buffer.from(this.buffers.get(locator.key));
+  }
+}
+
 async function createMediaFixtures(dir, options = {}) {
   const referencePath = path.join(dir, "reference.png");
   const sourcePath = path.join(dir, options.audioOnly ? "source-audio.mp4" : "source.mp4");
@@ -206,7 +235,7 @@ async function createMediaFixtures(dir, options = {}) {
   return { referencePath, sourcePath };
 }
 
-async function createTestService({ providers, configOverrides = {} }) {
+async function createTestService({ providers, configOverrides = {}, storageDriver = null }) {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-service-"));
   const config = {
     runnerPort: 0,
@@ -221,10 +250,10 @@ async function createTestService({ providers, configOverrides = {} }) {
     ...configOverrides
   };
   const jobStore = new FileJobStore(config.dataDir);
-  const storageDriver = createStorageDriver(config);
-  const service = new AvatarService({ config, jobStore, storageDriver, providers });
+  const resolvedStorageDriver = storageDriver || createStorageDriver(config);
+  const service = new AvatarService({ config, jobStore, storageDriver: resolvedStorageDriver, providers });
   await service.initialize();
-  return { rootDir, config, service };
+  return { rootDir, config, service, storageDriver: resolvedStorageDriver };
 }
 
 async function uploadAsset(service, filePath, kind) {
@@ -333,6 +362,49 @@ test("AvatarService records timeout failures and cancel lineage", async () => {
   assert.equal(completed.state, "failed");
   assert.equal(completed.failure.code, "provider_timeout");
   assert.equal(completed.lineage.providerPayloads.cancelArtifactId !== null, true);
+});
+
+test("AvatarService cleans up materialized temp media for remote locators", async () => {
+  const provider = new FakeSuccessProvider();
+  const providers = {
+    get(providerId) {
+      if (providerId !== provider.id) {
+        throw new Error(`Unknown provider ${providerId}`);
+      }
+      return provider;
+    },
+    list() {
+      return [provider.id];
+    }
+  };
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-remote-storage-"));
+  const remoteStorageDriver = new RemoteMemoryStorageDriver(tempDir);
+  const { rootDir, service } = await createTestService({
+    providers,
+    storageDriver: remoteStorageDriver
+  });
+  const { referencePath, sourcePath } = await createMediaFixtures(rootDir);
+  const referenceAsset = await uploadAsset(service, referencePath, "reference");
+  const sourceAsset = await uploadAsset(service, sourcePath, "driving");
+
+  const run = await service.createRun({
+    providerId: provider.id,
+    spec: {
+      referenceAssetId: referenceAsset.id,
+      sourceVideoAssetId: sourceAsset.id,
+      presetId: "preview-720p"
+    }
+  });
+
+  const completed = await waitForTerminalRun(service, run.id);
+  assert.equal(completed.state, "needs_review");
+
+  const materializedDir = path.join(os.tmpdir(), "avatar-project", "materialized");
+  const remainingFiles = await fs.readdir(materializedDir).catch(() => []);
+  const leakedFiles = remainingFiles.filter(
+    (name) => name.includes(referenceAsset.id) || name.includes(sourceAsset.id)
+  );
+  assert.deepEqual(leakedFiles, []);
 });
 
 test("AvatarService validates Replicate provider constraints at run creation", async () => {

@@ -244,6 +244,7 @@ export class AvatarService {
     this.activeRuns.add(runId);
 
     let providerState = null;
+    const materializedPaths = [];
 
     try {
       const run = await this.jobStore.getRun(runId);
@@ -268,8 +269,8 @@ export class AvatarService {
       const sourceAsset = await this.jobStore.getAsset(activeRun.sourceVideoAssetId);
 
       const [referencePath, sourcePath] = await Promise.all([
-        this.materializeLocator(referenceAsset.locator, `reference-${referenceAsset.id}${referenceAsset.extension}`),
-        this.materializeLocator(sourceAsset.locator, `driving-${sourceAsset.id}${sourceAsset.extension}`)
+        this.materializeLocator(referenceAsset.locator, `reference-${referenceAsset.id}${referenceAsset.extension}`, materializedPaths),
+        this.materializeLocator(sourceAsset.locator, `driving-${sourceAsset.id}${sourceAsset.extension}`, materializedPaths)
       ]);
 
       const submission = await provider.submitRun({
@@ -483,11 +484,12 @@ export class AvatarService {
         completedAt: nowIso()
       }));
     } finally {
+      await this.cleanupMaterializedFiles(materializedPaths);
       this.activeRuns.delete(runId);
     }
   }
 
-  async materializeLocator(locator, filename) {
+  async materializeLocator(locator, filename, materializedPaths = []) {
     if (locator.type === "local") {
       return locator.path;
     }
@@ -496,7 +498,16 @@ export class AvatarService {
     await fs.mkdir(tempDir, { recursive: true });
     const filePath = path.join(tempDir, `${Date.now()}-${filename}`);
     await fs.writeFile(filePath, buffer);
+    materializedPaths.push(filePath);
     return filePath;
+  }
+
+  async cleanupMaterializedFiles(filePaths) {
+    await Promise.all(
+      filePaths.map((filePath) =>
+        fs.rm(filePath, { force: true }).catch(() => {})
+      )
+    );
   }
 
   async persistJsonArtifact(runId, { kind, filename, payload }) {
