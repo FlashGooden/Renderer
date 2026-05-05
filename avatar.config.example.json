@@ -1,0 +1,10 @@
+{
+  "runnerUrl": "http://127.0.0.1:4010",
+  "dataDir": ".avatar",
+  "storageMode": "local",
+  "azureBlobBaseUrl": "",
+  "replicateApiToken": "",
+  "replicateModel": "bytedance/dreamactor-m2.0",
+  "providerTimeoutSec": 600,
+  "providerPollIntervalMs": 2000
+}
