@@ -61,7 +61,7 @@ async function getRun(baseUrl, runId) {
   return payload.run;
 }
 
-test("runner supports upload, run, fetch, and review", async () => {
+test("runner supports upload, run, fetch, and review", async (t) => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-runner-"));
   const { referencePath, sourcePath } = await createMediaFixtures(rootDir);
   const server = await createRunnerServer({
@@ -72,7 +72,18 @@ test("runner supports upload, run, fetch, and review", async () => {
     azureBlobBaseUrl: ""
   });
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+  } catch (error) {
+    if (error.code === "EPERM") {
+      t.skip("Sandbox does not permit binding a local port.");
+      return;
+    }
+    throw error;
+  }
   const address = server.address();
   const baseUrl = `http://127.0.0.1:${address.port}`;
 
@@ -121,13 +132,33 @@ test("runner supports upload, run, fetch, and review", async () => {
       },
       body: JSON.stringify({
         decision: "approve",
-        notes: "usable"
+        notes: "usable",
+        reviewer: "tester",
+        tags: ["usable"],
+        criteria: {
+          overall: "pass"
+        }
       })
     });
 
     assert.equal(reviewResponse.status, 200);
     const reviewed = await reviewResponse.json();
     assert.equal(reviewed.run.state, "succeeded");
+    assert.equal(reviewed.run.reviewHistory.length, 1);
+
+    const previewResponse = await fetch(new URL(`/runs/${run.id}/previews`, baseUrl), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        kinds: ["preview_still", "contact_sheet"]
+      })
+    });
+
+    assert.equal(previewResponse.status, 200);
+    const previewPayload = await previewResponse.json();
+    assert.equal(previewPayload.artifacts.length, 2);
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
