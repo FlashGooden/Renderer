@@ -4,17 +4,18 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { ensureDir, sanitizeFilename } from "./fs-utils.js";
+import type { AssetKind, MediaInspection } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
 export const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg"]);
 export const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".webm"]);
 
-export function getExtension(filename) {
+export function getExtension(filename: string): string {
   return path.extname(filename || "").toLowerCase();
 }
 
-export function contentTypeForExtension(extension) {
+export function contentTypeForExtension(extension: string): string {
   switch (extension) {
     case ".png":
       return "image/png";
@@ -30,7 +31,7 @@ export function contentTypeForExtension(extension) {
   }
 }
 
-export function assertSupportedFilename(kind, filename) {
+export function assertSupportedFilename(kind: AssetKind, filename: string): void {
   const extension = getExtension(filename);
   if (kind === "reference" && !IMAGE_EXTENSIONS.has(extension)) {
     throw new Error(`Reference images must use one of: ${[...IMAGE_EXTENSIONS].join(", ")}`);
@@ -40,7 +41,7 @@ export function assertSupportedFilename(kind, filename) {
   }
 }
 
-export async function inspectMedia(filePath) {
+export async function inspectMedia(filePath: string): Promise<MediaInspection> {
   const { stdout } = await execFileAsync("ffprobe", [
     "-v",
     "error",
@@ -52,7 +53,7 @@ export async function inspectMedia(filePath) {
   ]);
 
   const payload = JSON.parse(stdout);
-  const videoStream = payload.streams?.find((stream) => stream.codec_type === "video");
+  const videoStream = payload.streams?.find((stream: any) => stream.codec_type === "video");
   const format = payload.format || {};
   const formatNames = String(format.format_name || "")
     .split(",")
@@ -72,7 +73,7 @@ export async function inspectMedia(filePath) {
   };
 }
 
-export function parseFrameRate(value) {
+export function parseFrameRate(value?: string | null): number {
   if (!value || value === "0/0") {
     return 0;
   }
@@ -83,7 +84,7 @@ export function parseFrameRate(value) {
   return num / den;
 }
 
-export async function writeTempFile(prefix, filename, buffer) {
+export async function writeTempFile(prefix: string, filename: string, buffer: Buffer): Promise<string> {
   const tmpDir = path.join(os.tmpdir(), "avatar-project");
   await ensureDir(tmpDir);
   const filePath = path.join(tmpDir, `${prefix}-${Date.now()}-${sanitizeFilename(filename)}`);
@@ -91,6 +92,6 @@ export async function writeTempFile(prefix, filename, buffer) {
   return filePath;
 }
 
-export function createDataUrl(contentType, buffer) {
+export function createDataUrl(contentType: string, buffer: Buffer): string {
   return `data:${contentType};base64,${buffer.toString("base64")}`;
 }

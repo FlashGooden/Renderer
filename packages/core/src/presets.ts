@@ -1,3 +1,5 @@
+import type { Preset } from "./types.js";
+
 export const PRESETS = {
   "preview-720p": {
     id: "preview-720p",
@@ -44,10 +46,10 @@ export const PRESETS = {
       }
     }
   }
-};
+} as const satisfies Record<string, Preset>;
 
-export function getPreset(presetId) {
-  const preset = PRESETS[presetId];
+export function getPreset(presetId: string): Preset {
+  const preset = PRESETS[presetId as keyof typeof PRESETS];
   if (!preset) {
     throw new Error(`Unknown preset "${presetId}".`);
   }
