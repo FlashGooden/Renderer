@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/flashgoodenpro/Development/Renderer/**)",
+      "Bash(npm run *)",
+      "Bash(npx tsc *)",
+      "Bash(npx --no-install tsc --version)",
+      "Bash(node node_modules/typescript/bin/tsc --version)",
+      "Bash(npm install *)",
+      "Bash(npm test *)"
+    ]
+  }
+}
