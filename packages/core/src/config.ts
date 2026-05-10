@@ -1,9 +1,10 @@
 import path from "node:path";
 import { readJson } from "./fs-utils.js";
+import type { AnyRecord, ProjectConfig } from "./types.js";
 
-export async function loadProjectConfig(cwd = process.cwd(), env = process.env) {
+export async function loadProjectConfig(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): Promise<ProjectConfig> {
   const configPath = path.join(cwd, "avatar.config.json");
-  const fileConfig = (await readJson(configPath, {})) || {};
+  const fileConfig = ((await readJson<AnyRecord>(configPath, {})) || {}) as AnyRecord;
 
   return {
     runnerUrl: env.AVATAR_RUNNER_URL || fileConfig.runnerUrl || "http://127.0.0.1:4010",
