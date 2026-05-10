@@ -2,6 +2,43 @@
   "name": "@avatar/core",
   "version": "0.1.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "exports": {
+    "./compare.js": {
+      "types": "./dist/src/compare.d.ts",
+      "import": "./dist/src/compare.js"
+    },
+    "./config.js": {
+      "types": "./dist/src/config.d.ts",
+      "import": "./dist/src/config.js"
+    },
+    "./contracts.js": {
+      "types": "./dist/src/contracts.d.ts",
+      "import": "./dist/src/contracts.js"
+    },
+    "./http.js": {
+      "types": "./dist/src/http.d.ts",
+      "import": "./dist/src/http.js"
+    },
+    "./job-store.js": {
+      "types": "./dist/src/job-store.d.ts",
+      "import": "./dist/src/job-store.js"
+    },
+    "./providers.js": {
+      "types": "./dist/src/providers.d.ts",
+      "import": "./dist/src/providers.js"
+    },
+    "./service.js": {
+      "types": "./dist/src/service.d.ts",
+      "import": "./dist/src/service.js"
+    },
+    "./storage.js": {
+      "types": "./dist/src/storage.d.ts",
+      "import": "./dist/src/storage.js"
+    },
+    "./types.js": {
+      "types": "./dist/src/types.d.ts",
+      "import": "./dist/src/types.js"
+    }
+  }
 }
-

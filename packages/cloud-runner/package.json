@@ -2,6 +2,8 @@
   "name": "@avatar/cloud-runner",
   "version": "0.1.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@avatar/core": "file:../core"
+  }
 }
-
