@@ -116,11 +116,12 @@ export class AvatarService {
 
     this.assertAssetMedia(kind, media);
 
-    const { locator } = await this.storageDriver.putBuffer(
+    const { locator, bytes: storedBytes } = await this.storageDriver.putBuffer(
       `inputs/${kind}/${assetId}${extension}`,
       buffer,
       contentType
     );
+    void storedBytes;
 
     await fs.rm(tempPath, { force: true });
 
@@ -668,7 +669,8 @@ export class AvatarService {
           sourceProviderUrl: providerResult.outputUrl
         }
       });
-      const { buffer: outputBuffer } = await this.storageDriver.readBuffer(outputArtifact.locator);
+      const { buffer: outputBuffer, bytes: outputBytes } = await this.storageDriver.readBuffer(outputArtifact.locator);
+      void outputBytes;
       const outputChecksum = await sha256(outputBuffer);
       const outputMeta = await inspectMedia(providerResult.outputPath);
       const evaluation = await evaluateRun({
@@ -752,7 +754,8 @@ export class AvatarService {
       }
       return locator.path;
     }
-    const { buffer } = await this.storageDriver.readBuffer(locator);
+    const { buffer, bytes: readBytes } = await this.storageDriver.readBuffer(locator);
+    void readBytes;
     const tempDir = path.join(os.tmpdir(), "avatar-project", "materialized");
     await fs.mkdir(tempDir, { recursive: true });
     const filePath = path.join(tempDir, `${Date.now()}-${filename}`);
@@ -790,11 +793,12 @@ export class AvatarService {
 
   async persistFileArtifact(runId: string, { kind, filename, sourcePath, contentType, metadata = {} }: { kind: ArtifactKind | string; filename: string; sourcePath: string; contentType: string; metadata?: AnyRecord }): Promise<Artifact> {
     const artifactId = createId("artifact");
-    const { locator } = await this.storageDriver.putFile(
+    const { locator, bytes: storedBytes } = await this.storageDriver.putFile(
       `outputs/${runId}/${artifactId}${path.extname(filename)}`,
       sourcePath,
       contentType
     );
+    void storedBytes;
 
     const artifact = this._buildArtifactRecord({ artifactId, kind, filename, locator, contentType, metadata });
 
@@ -809,7 +813,7 @@ export class AvatarService {
 
   async persistBufferArtifact(runId: string, { kind, filename, buffer, contentType, metadata = {} }: { kind: ArtifactKind | string; filename: string; buffer: Buffer; contentType: string; metadata?: AnyRecord }): Promise<Artifact> {
     const artifactId = createId("artifact");
-    const { locator } = await this.storageDriver.putBuffer(
+    const { locator, bytes: storedBytes } = await this.storageDriver.putBuffer(
       `outputs/${runId}/${artifactId}${path.extname(filename)}`,
       buffer,
       contentType
@@ -821,7 +825,7 @@ export class AvatarService {
       filename,
       locator,
       contentType,
-      metadata: { ...metadata, sizeBytes: buffer.length }
+      metadata: { ...metadata, sizeBytes: storedBytes }
     });
   }
 
