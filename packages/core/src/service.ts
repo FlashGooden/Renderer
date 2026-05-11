@@ -58,12 +58,6 @@ function buildProviderSnapshot(provider: Provider, state: ProviderState | null =
   };
 }
 
-function buildFailure(error: unknown, providerState: ProviderState | null = null) {
-  return normalizeReplicateFailure(error, {
-    providerStatus: providerState?.status || null
-  });
-}
-
 function deriveLatestReview(reviewHistory: ReviewEntry[]): ReviewEntry | null {
   if (!reviewHistory.length) {
     return null;
@@ -724,7 +718,7 @@ export class AvatarService {
         completedAt: nowIso()
       }));
     } catch (error) {
-      const failure = buildFailure(error, providerState);
+      const failure = normalizeReplicateFailure(error, { providerStatus: providerState?.status || null });
       await this.jobStore.updateRun(runId, (current) => ({
         ...current,
         state: "failed",
@@ -768,6 +762,18 @@ export class AvatarService {
     await Promise.all(filePaths.map((filePath) => fs.rm(filePath, { force: true }).catch(() => {})));
   }
 
+  _buildArtifactRecord({ artifactId, kind, filename, locator, contentType, metadata }: { artifactId: string; kind: ArtifactKind | string; filename: string; locator: StorageLocator; contentType: string; metadata: AnyRecord }): Artifact {
+    return {
+      id: artifactId,
+      kind,
+      filename,
+      locator,
+      contentType,
+      createdAt: nowIso(),
+      metadata
+    };
+  }
+
   async persistJsonArtifact(runId: string, { kind, filename, payload }: { kind: ArtifactKind | string; filename: string; payload: unknown }): Promise<Artifact> {
     const buffer = Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf8");
     return this.persistBufferArtifact(runId, {
@@ -775,9 +781,7 @@ export class AvatarService {
       filename,
       buffer,
       contentType: "application/json",
-      metadata: {
-        contentType: "application/json"
-      }
+      metadata: {}
     });
   }
 
@@ -789,15 +793,7 @@ export class AvatarService {
       contentType
     );
 
-    const artifact = {
-      id: artifactId,
-      kind,
-      filename,
-      locator,
-      contentType,
-      createdAt: nowIso(),
-      metadata
-    };
+    const artifact = this._buildArtifactRecord({ artifactId, kind, filename, locator, contentType, metadata });
 
     await this.jobStore.updateRun(runId, (current) => ({
       ...current,
@@ -816,18 +812,14 @@ export class AvatarService {
       contentType
     );
 
-    return {
-      id: artifactId,
+    return this._buildArtifactRecord({
+      artifactId,
       kind,
       filename,
       locator,
       contentType,
-      createdAt: nowIso(),
-      metadata: {
-        ...metadata,
-        sizeBytes: buffer.length
-      }
-    };
+      metadata: { ...metadata, sizeBytes: buffer.length }
+    });
   }
 
   assertAssetMedia(kind: AssetKind, media: MediaInspection): void {
