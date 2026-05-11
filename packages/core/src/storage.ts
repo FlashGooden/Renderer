@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createReadStream, type ReadStream } from "node:fs";
 import { ensureDir } from "./fs-utils.js";
-import type { ProjectConfig, StorageDriver, StorageLocator } from "./types.js";
+import type { ProjectConfig, StorageDriver, StorageLocator, StorageReadResult, StorageWriteResult } from "./types.js";
 
 export class LocalStorageDriver implements StorageDriver {
   rootDir: string;
@@ -15,31 +15,42 @@ export class LocalStorageDriver implements StorageDriver {
     await ensureDir(this.rootDir);
   }
 
-  async putBuffer(relativePath: string, buffer: Buffer): Promise<StorageLocator> {
+  async putBuffer(relativePath: string, buffer: Buffer): Promise<StorageWriteResult> {
     const absolutePath = path.join(this.rootDir, relativePath);
     await ensureDir(path.dirname(absolutePath));
     await fs.writeFile(absolutePath, buffer);
     return {
-      type: "local",
-      path: absolutePath
+      locator: {
+        type: "local",
+        path: absolutePath
+      },
+      bytes: buffer.length
     };
   }
 
-  async putFile(relativePath: string, sourcePath: string): Promise<StorageLocator> {
+  async putFile(relativePath: string, sourcePath: string): Promise<StorageWriteResult> {
     const absolutePath = path.join(this.rootDir, relativePath);
     await ensureDir(path.dirname(absolutePath));
     await fs.copyFile(sourcePath, absolutePath);
+    const stat = await fs.stat(absolutePath);
     return {
-      type: "local",
-      path: absolutePath
+      locator: {
+        type: "local",
+        path: absolutePath
+      },
+      bytes: stat.size
     };
   }
 
-  async readBuffer(locator: StorageLocator): Promise<Buffer> {
+  async readBuffer(locator: StorageLocator): Promise<StorageReadResult> {
     if (!locator.path) {
       throw new Error("Local storage locator is missing a path.");
     }
-    return fs.readFile(locator.path);
+    const buffer = await fs.readFile(locator.path);
+    return {
+      buffer,
+      bytes: buffer.length
+    };
   }
 
   createReadStream(locator: StorageLocator): ReadStream {
@@ -70,7 +81,7 @@ export class AzureBlobStorageDriver implements StorageDriver {
     return url.toString();
   }
 
-  async putBuffer(relativePath: string, buffer: Buffer, contentType = "application/octet-stream"): Promise<StorageLocator> {
+  async putBuffer(relativePath: string, buffer: Buffer, contentType = "application/octet-stream"): Promise<StorageWriteResult> {
     const url = this.buildUrl(relativePath);
     const response = await fetch(url, {
       method: "PUT",
@@ -87,17 +98,20 @@ export class AzureBlobStorageDriver implements StorageDriver {
     }
 
     return {
-      type: "azure-blob",
-      url
+      locator: {
+        type: "azure-blob",
+        url
+      },
+      bytes: buffer.length
     };
   }
 
-  async putFile(relativePath: string, sourcePath: string, contentType = "application/octet-stream"): Promise<StorageLocator> {
+  async putFile(relativePath: string, sourcePath: string, contentType = "application/octet-stream"): Promise<StorageWriteResult> {
     const buffer = await fs.readFile(sourcePath);
     return this.putBuffer(relativePath, buffer, contentType);
   }
 
-  async readBuffer(locator: StorageLocator): Promise<Buffer> {
+  async readBuffer(locator: StorageLocator): Promise<StorageReadResult> {
     if (!locator.url) {
       throw new Error("Azure Blob locator is missing a URL.");
     }
@@ -105,7 +119,11 @@ export class AzureBlobStorageDriver implements StorageDriver {
     if (!response.ok) {
       throw new Error(`Azure Blob download failed with status ${response.status}.`);
     }
-    return Buffer.from(await response.arrayBuffer());
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return {
+      buffer,
+      bytes: buffer.length
+    };
   }
 
   createReadStream(): never {

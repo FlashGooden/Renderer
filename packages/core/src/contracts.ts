@@ -13,7 +13,7 @@ import type {
 } from "./types.js";
 
 export const ASSET_KINDS = ["reference", "driving"] as const;
-export const RUN_STATES = ["queued", "running", "needs_review", "succeeded", "failed"] as const;
+export const RUN_STATES = ["queued", "running", "needs_review", "succeeded", "failed", "dead_lettered"] as const;
 export const REVIEW_DECISIONS = ["approve", "reject"] as const;
 export const REVIEW_CRITERIA_KEYS = ["identity", "motion", "stability", "corruption", "overall"] as const;
 export const REVIEW_CRITERIA_STATES = ["pass", "fail", "needs_work", "unreviewed"] as const;

@@ -103,7 +103,7 @@ export function createRunnerHandler({ service, storageDriver, providers }: { ser
       const artifactMatch = url.pathname.match(/^\/runs\/([^/]+)\/artifacts\/([^/]+)\/content$/);
       if (request.method === "GET" && artifactMatch) {
         const artifact = await service.getArtifact(artifactMatch[1], artifactMatch[2]);
-        const buffer = await storageDriver.readBuffer(artifact.locator);
+        const { buffer } = await storageDriver.readBuffer(artifact.locator);
         response.writeHead(200, {
           "content-type": artifact.contentType || "application/octet-stream",
           "content-length": String(buffer.length),
