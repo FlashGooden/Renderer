@@ -51,11 +51,11 @@ all user stories depend on. No user story work can begin until this phase is com
 
 **⚠️ CRITICAL**: US3–US6 all depend on this phase completing first.
 
-- [ ] T004 Update `LocalStorageDriver` in `packages/core/src/storage.ts`: modify `putBuffer` to return `{ locator, bytes: buffer.length }`, `putFile` to return `{ locator, bytes: stat.size }` (use `fs.stat` after copy), `readBuffer` to return `{ buffer, bytes: buffer.length }`; update all internal call sites
-- [ ] T005 [P] Update `AzureBlobStorageDriver` in `packages/core/src/storage.ts`: same return-type changes as T004; `putBuffer` bytes = `buffer.length`; `putFile` bytes = buffer read from `fs.readFile`; `readBuffer` bytes = `buffer.length`
-- [ ] T006 Implement `listRuns` in `packages/core/src/job-store.ts`: scan `<rootDir>/runs/*.json`, read each file, apply `state[]` filter and `limit` cap (default 100, max 500); if `includeArchived`, also scan `<rootDir>/archive/runs/*.json` and tag with `archived: true`; update `getRun` to fall back to archive path when live path returns `null`
-- [ ] T007 Implement `archiveRun` in `packages/core/src/job-store.ts`: move `runs/<runId>.json` → `archive/runs/<runId>.json` (create `archive/runs/` via `ensureDir`); add `archive/runs/` dir creation to `initialize()`
-- [ ] T008 Update all `AvatarService` call sites in `packages/core/src/service.ts` that call `storageDriver.putBuffer`, `putFile`, or `readBuffer` to destructure `{ locator, bytes }` / `{ buffer, bytes }` from the new return shapes; no behavior change yet
+- [x] T004 Update `LocalStorageDriver` in `packages/core/src/storage.ts`: modify `putBuffer` to return `{ locator, bytes: buffer.length }`, `putFile` to return `{ locator, bytes: stat.size }` (use `fs.stat` after copy), `readBuffer` to return `{ buffer, bytes: buffer.length }`; update all internal call sites
+- [x] T005 [P] Update `AzureBlobStorageDriver` in `packages/core/src/storage.ts`: same return-type changes as T004; `putBuffer` bytes = `buffer.length`; `putFile` bytes = buffer read from `fs.readFile`; `readBuffer` bytes = `buffer.length`
+- [x] T006 Implement `listRuns` in `packages/core/src/job-store.ts`: scan `<rootDir>/runs/*.json`, read each file, apply `state[]` filter and `limit` cap (default 100, max 500); if `includeArchived`, also scan `<rootDir>/archive/runs/*.json` and tag with `archived: true`; update `getRun` to fall back to archive path when live path returns `null`
+- [x] T007 Implement `archiveRun` in `packages/core/src/job-store.ts`: move `runs/<runId>.json` → `archive/runs/<runId>.json` (create `archive/runs/` via `ensureDir`); add `archive/runs/` dir creation to `initialize()`
+- [x] T008 Update all `AvatarService` call sites in `packages/core/src/service.ts` that call `storageDriver.putBuffer`, `putFile`, or `readBuffer` to destructure `{ locator, bytes }` / `{ buffer, bytes }` from the new return shapes; no behavior change yet
 
 **Checkpoint**: Storage byte-tracking and job-store extensions ready — user story phases can now begin.
 
