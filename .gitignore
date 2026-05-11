@@ -6,3 +6,6 @@ tmp/
 dist/
 
 .claude/worktrees/
+
+renderer/.claude/
+renderer/.specify/
