@@ -177,9 +177,12 @@ class RemoteMemoryStorageDriver {
   async putBuffer(relativePath, buffer) {
     this.buffers.set(relativePath, Buffer.from(buffer));
     return {
-      type: "azure-blob",
-      url: `https://example.invalid/${relativePath}`,
-      key: relativePath
+      locator: {
+        type: "azure-blob",
+        url: `https://example.invalid/${relativePath}`,
+        key: relativePath
+      },
+      bytes: buffer.length
     };
   }
 
@@ -189,7 +192,11 @@ class RemoteMemoryStorageDriver {
   }
 
   async readBuffer(locator) {
-    return Buffer.from(this.buffers.get(locator.key));
+    const buffer = Buffer.from(this.buffers.get(locator.key));
+    return {
+      buffer,
+      bytes: buffer.length
+    };
   }
 }
 
@@ -601,7 +608,9 @@ test("AvatarService persists benchmark entities, review history, previews, and c
   const previewArtifacts = await service.generateRunPreviews(primaryRun.id);
   const previewKinds = previewArtifacts.map((artifact) => artifact.kind).sort();
   assert.deepEqual(previewKinds, ["contact_sheet", "preview_still"]);
-  const previewBytes = await Promise.all(previewArtifacts.map((artifact) => service.storageDriver.readBuffer(artifact.locator)));
+  const previewBytes = await Promise.all(
+    previewArtifacts.map(async (artifact) => (await service.storageDriver.readBuffer(artifact.locator)).buffer)
+  );
   assert.equal(previewBytes.every((buffer) => buffer.length > 0), true);
 
   const sameInputComparison = await service.compareRuns(primaryRun.id, fallbackRun.id);

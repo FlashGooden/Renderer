@@ -1,6 +1,7 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { ensureDir, readJson, writeJson } from "./fs-utils.js";
-import type { Asset, BenchmarkDataset, BenchmarkRunGroup, JobStore, ReviewEntry, Run } from "./types.js";
+import type { Asset, BenchmarkDataset, BenchmarkRunGroup, JobStore, ReviewEntry, Run, RunState } from "./types.js";
 
 function normalizeReviewStorage(review: ReviewEntry | ReviewEntry[] | { reviewHistory?: ReviewEntry[] } | null): ReviewEntry[] {
   if (!review) {
@@ -80,6 +81,23 @@ export class FileJobStore implements JobStore {
     return readJson<Run>(this.runPath(runId));
   }
 
+  async listRuns(options: { includeArchived?: boolean; states?: RunState[]; limit?: number } = {}): Promise<Run[]> {
+    const entries = await fs.readdir(this.runsDir, { withFileTypes: true }).catch(() => []);
+    const runs = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+        .map((entry) => readJson<Run>(path.join(this.runsDir, entry.name)))
+    );
+    const states = options.states ? new Set(options.states) : null;
+    const filteredRuns = runs
+      .filter((run): run is Run => Boolean(run))
+      .filter((run) => options.includeArchived || !run.archived)
+      .filter((run) => !states || states.has(run.state))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+
+    return typeof options.limit === "number" ? filteredRuns.slice(0, options.limit) : filteredRuns;
+  }
+
   async updateRun(runId: string, updater: Partial<Run> | ((run: Run) => Run | Promise<Run>)): Promise<Run> {
     const current = await this.getRun(runId);
     if (!current) {
@@ -88,6 +106,21 @@ export class FileJobStore implements JobStore {
     const next = typeof updater === "function" ? await updater(current) : { ...current, ...updater };
     await writeJson(this.runPath(runId), next);
     return next;
+  }
+
+  async archiveRun(runId: string, reason = ""): Promise<Run> {
+    return this.updateRun(runId, (current) => ({
+      ...current,
+      archived: true,
+      lineage: {
+        ...current.lineage,
+        archived: {
+          reason,
+          archivedAt: new Date().toISOString()
+        }
+      },
+      updatedAt: new Date().toISOString()
+    }));
   }
 
   async appendReview(runId: string, reviewEntry: ReviewEntry): Promise<ReviewEntry[]> {

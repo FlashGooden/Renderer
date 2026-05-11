@@ -6,7 +6,7 @@ export interface JsonObject {
 export type AnyRecord = Record<string, any>;
 
 export type AssetKind = "reference" | "driving";
-export type RunState = "queued" | "running" | "needs_review" | "succeeded" | "failed";
+export type RunState = "queued" | "running" | "needs_review" | "succeeded" | "failed" | "dead_lettered";
 export type ReviewDecision = "approve" | "reject";
 export type ReviewCriterionKey = "identity" | "motion" | "stability" | "corruption" | "overall";
 export type ReviewCriterionState = "pass" | "fail" | "needs_work" | "unreviewed";
@@ -53,12 +53,34 @@ export interface ProjectConfig {
   replicateModel: string;
   providerTimeoutSec: number;
   providerPollIntervalMs: number;
+  queuePollIntervalMs: number;
+  queueMaxConcurrent: number;
+  staleRunThresholdMs: number;
+  staleRunSweepIntervalMs: number;
+  tempFileMaxAgeSec: number;
+  artifactRetentionDays: number;
+  videoRetentionDays: number;
+  metadataRetentionDays: number;
+  replicateCostPerSecondUsd: number;
+  azureBlobWriteUsdPerGb: number;
+  azureBlobReadUsdPerGb: number;
+  computeUsdPerMs: number;
 }
 
 export interface StorageLocator extends AnyRecord {
   type: string;
   path?: string;
   url?: string;
+}
+
+export interface StorageWriteResult {
+  locator: StorageLocator;
+  bytes: number;
+}
+
+export interface StorageReadResult {
+  buffer: Buffer;
+  bytes: number;
 }
 
 export interface MediaInspection {
@@ -136,6 +158,69 @@ export interface Failure {
   details: AnyRecord;
 }
 
+export interface RetryPolicy {
+  maxAttempts: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+  backoffMultiplier: number;
+  jitterRatio: number;
+  retryableFailureCodes?: string[];
+}
+
+export interface RetryState {
+  attempts: number;
+  maxAttempts: number;
+  nextRetryAt: string | null;
+  lastAttemptAt: string | null;
+  lastFailureCode: string | null;
+  lastFailureMessage: string | null;
+}
+
+export interface QueueEntry {
+  id: string;
+  runId: string;
+  state: "queued" | "leased" | "completed" | "failed" | "dead_lettered";
+  priority: number;
+  attempts: number;
+  availableAt: string;
+  leasedAt: string | null;
+  leaseExpiresAt: string | null;
+  workerId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RunCost {
+  estimatedUsd: number;
+  providerUsd?: number;
+  storageWriteUsd?: number;
+  storageReadUsd?: number;
+  computeUsd?: number;
+  totalUsd?: number;
+  currency?: string;
+  details?: AnyRecord;
+}
+
+export interface RunnerMetrics {
+  queueWaitMs?: number;
+  providerRuntimeMs?: number;
+  totalRuntimeMs?: number;
+  storageBytesWritten?: number;
+  storageBytesRead?: number;
+  computeMs?: number;
+  providerPollCount?: number;
+  details?: AnyRecord;
+}
+
+export interface LogEntry {
+  id: string;
+  runId?: string;
+  timestamp: string;
+  level: "debug" | "info" | "warn" | "error";
+  message: string;
+  context?: AnyRecord;
+}
+
 export interface EvaluationResult extends AnyRecord {
   overallScore: number;
   identityScore: number;
@@ -184,7 +269,11 @@ export interface Run {
   candidateLabel: string;
   artifacts: Artifact[];
   attempts: number;
-  cost: { estimatedUsd: number };
+  cost: RunCost;
+  retryState: RetryState | null;
+  deadLetteredAt: string | null;
+  deadLetterReason: string | null;
+  archived?: boolean;
   evaluation: EvaluationResult | null;
   failure: Failure | null;
   failureReason: string | null;
@@ -274,9 +363,9 @@ export interface ProviderRegistry {
 
 export interface StorageDriver {
   initialize(): Promise<void>;
-  putBuffer(relativePath: string, buffer: Buffer, contentType?: string): Promise<StorageLocator>;
-  putFile(relativePath: string, sourcePath: string, contentType?: string): Promise<StorageLocator>;
-  readBuffer(locator: StorageLocator): Promise<Buffer>;
+  putBuffer(relativePath: string, buffer: Buffer, contentType?: string): Promise<StorageWriteResult>;
+  putFile(relativePath: string, sourcePath: string, contentType?: string): Promise<StorageWriteResult>;
+  readBuffer(locator: StorageLocator): Promise<StorageReadResult>;
   createReadStream?(locator: StorageLocator): any;
 }
 
@@ -286,7 +375,9 @@ export interface JobStore {
   getAsset(assetId: string): Promise<Asset | null>;
   createRun(run: Run): Promise<Run>;
   getRun(runId: string): Promise<Run | null>;
+  listRuns(options?: { includeArchived?: boolean; states?: RunState[]; limit?: number }): Promise<Run[]>;
   updateRun(runId: string, updater: Partial<Run> | ((run: Run) => Run | Promise<Run>)): Promise<Run>;
+  archiveRun(runId: string, reason?: string): Promise<Run>;
   appendReview(runId: string, reviewEntry: ReviewEntry): Promise<ReviewEntry[]>;
   getReviewHistory(runId: string): Promise<ReviewEntry[]>;
   createBenchmarkDataset(dataset: BenchmarkDataset): Promise<BenchmarkDataset>;
