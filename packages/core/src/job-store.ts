@@ -20,6 +20,7 @@ export class FileJobStore implements JobStore {
   rootDir: string;
   assetsDir: string;
   runsDir: string;
+  archiveRunsDir: string;
   reviewsDir: string;
   benchmarkDatasetsDir: string;
   benchmarkRunGroupsDir: string;
@@ -28,6 +29,7 @@ export class FileJobStore implements JobStore {
     this.rootDir = rootDir;
     this.assetsDir = path.join(rootDir, "assets");
     this.runsDir = path.join(rootDir, "runs");
+    this.archiveRunsDir = path.join(rootDir, "archive", "runs");
     this.reviewsDir = path.join(rootDir, "reviews");
     this.benchmarkDatasetsDir = path.join(rootDir, "benchmark-datasets");
     this.benchmarkRunGroupsDir = path.join(rootDir, "benchmark-run-groups");
@@ -37,6 +39,7 @@ export class FileJobStore implements JobStore {
     await Promise.all([
       ensureDir(this.assetsDir),
       ensureDir(this.runsDir),
+      ensureDir(this.archiveRunsDir),
       ensureDir(this.reviewsDir),
       ensureDir(this.benchmarkDatasetsDir),
       ensureDir(this.benchmarkRunGroupsDir)
@@ -49,6 +52,10 @@ export class FileJobStore implements JobStore {
 
   runPath(runId: string): string {
     return path.join(this.runsDir, `${runId}.json`);
+  }
+
+  archiveRunPath(runId: string): string {
+    return path.join(this.archiveRunsDir, `${runId}.json`);
   }
 
   reviewPath(runId: string): string {
@@ -78,24 +85,37 @@ export class FileJobStore implements JobStore {
   }
 
   async getRun(runId: string): Promise<Run | null> {
-    return readJson<Run>(this.runPath(runId));
+    const liveRun = await readJson<Run>(this.runPath(runId));
+    if (liveRun) {
+      return liveRun;
+    }
+    const archivedRun = await readJson<Run>(this.archiveRunPath(runId));
+    return archivedRun ? { ...archivedRun, archived: true } : null;
   }
 
   async listRuns(options: { includeArchived?: boolean; states?: RunState[]; limit?: number } = {}): Promise<Run[]> {
-    const entries = await fs.readdir(this.runsDir, { withFileTypes: true }).catch(() => []);
-    const runs = await Promise.all(
-      entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-        .map((entry) => readJson<Run>(path.join(this.runsDir, entry.name)))
-    );
+    const limit = Math.min(Math.max(options.limit ?? 100, 0), 500);
+    const runs = await this.readRunFiles(this.runsDir);
+    if (options.includeArchived) {
+      runs.push(...(await this.readRunFiles(this.archiveRunsDir, true)));
+    }
     const states = options.states ? new Set(options.states) : null;
     const filteredRuns = runs
       .filter((run): run is Run => Boolean(run))
-      .filter((run) => options.includeArchived || !run.archived)
       .filter((run) => !states || states.has(run.state))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 
-    return typeof options.limit === "number" ? filteredRuns.slice(0, options.limit) : filteredRuns;
+    return filteredRuns.slice(0, limit);
+  }
+
+  async readRunFiles(dirPath: string, archived = false): Promise<Run[]> {
+    const entries = await fs.readdir(dirPath, { withFileTypes: true }).catch(() => []);
+    const runs = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+        .map((entry) => readJson<Run>(path.join(dirPath, entry.name)))
+    );
+    return runs.filter((run): run is Run => Boolean(run)).map((run) => (archived ? { ...run, archived: true } : run));
   }
 
   async updateRun(runId: string, updater: Partial<Run> | ((run: Run) => Run | Promise<Run>)): Promise<Run> {
@@ -109,7 +129,16 @@ export class FileJobStore implements JobStore {
   }
 
   async archiveRun(runId: string, reason = ""): Promise<Run> {
-    return this.updateRun(runId, (current) => ({
+    const current = await readJson<Run>(this.runPath(runId));
+    if (!current) {
+      const archivedRun = await readJson<Run>(this.archiveRunPath(runId));
+      if (archivedRun) {
+        return { ...archivedRun, archived: true };
+      }
+      throw new Error(`Run "${runId}" was not found.`);
+    }
+
+    const archivedRun: Run = {
       ...current,
       archived: true,
       lineage: {
@@ -120,7 +149,12 @@ export class FileJobStore implements JobStore {
         }
       },
       updatedAt: new Date().toISOString()
-    }));
+    };
+
+    await ensureDir(this.archiveRunsDir);
+    await writeJson(this.archiveRunPath(runId), archivedRun);
+    await fs.rm(this.runPath(runId), { force: true });
+    return archivedRun;
   }
 
   async appendReview(runId: string, reviewEntry: ReviewEntry): Promise<ReviewEntry[]> {
