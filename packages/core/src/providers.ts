@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { ensureDir } from "./fs-utils.js";
 import { contentTypeForExtension, createDataUrl } from "./media.js";
+import type { AnyRecord, Asset, Failure, FailureCode, Preset, ProjectConfig, Provider, ProviderState } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -12,7 +13,10 @@ const SUCCESS_STATUSES = new Set(["succeeded", "successful"]);
 const FAILURE_STATUSES = new Set(["failed", "canceled", "cancelled"]);
 
 export class ProviderError extends Error {
-  constructor(code, message, details = {}) {
+  code: FailureCode | string;
+  details: AnyRecord;
+
+  constructor(code: FailureCode | string, message: string, details: AnyRecord = {}) {
     super(message);
     this.name = "ProviderError";
     this.code = code;
@@ -20,11 +24,11 @@ export class ProviderError extends Error {
   }
 }
 
-function sleep(ms) {
+function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildReplicateHeaders(apiToken, extraHeaders = {}) {
+function buildReplicateHeaders(apiToken: string, extraHeaders: Record<string, string> = {}) {
   return {
     authorization: `Bearer ${apiToken}`,
     "content-type": "application/json",
@@ -33,7 +37,7 @@ function buildReplicateHeaders(apiToken, extraHeaders = {}) {
   };
 }
 
-function parseModelRef(modelRef) {
+function parseModelRef(modelRef: string) {
   const [owner, model] = String(modelRef || "").split("/");
   if (!owner || !model) {
     throw new ProviderError("provider_validation", `Replicate model "${modelRef}" must use owner/model format.`);
@@ -41,20 +45,20 @@ function parseModelRef(modelRef) {
   return { owner, model };
 }
 
-function createReplicateApiUrl(modelRef) {
+function createReplicateApiUrl(modelRef: string): string {
   const { owner, model } = parseModelRef(modelRef);
   return `https://api.replicate.com/v1/models/${owner}/${model}/predictions`;
 }
 
-function getPresetOptions(preset, providerId) {
+function getPresetOptions(preset: Preset, providerId: string): AnyRecord {
   return preset.providers?.[providerId] || {};
 }
 
-function isTerminalStatus(status) {
+function isTerminalStatus(status: string): boolean {
   return SUCCESS_STATUSES.has(status) || FAILURE_STATUSES.has(status);
 }
 
-function extractOutputUrl(output) {
+function extractOutputUrl(output: any): string | null {
   if (!output) {
     return null;
   }
@@ -76,7 +80,7 @@ function extractOutputUrl(output) {
   return null;
 }
 
-export function normalizeReplicateFailure(error, context = {}) {
+export function normalizeReplicateFailure(error: unknown, context: { providerStatus?: string | null } = {}): Failure {
   if (error instanceof ProviderError) {
     return {
       code: error.code,
@@ -87,7 +91,7 @@ export function normalizeReplicateFailure(error, context = {}) {
     };
   }
 
-  const message = error?.message || "Provider request failed.";
+  const message = error instanceof Error ? error.message : "Provider request failed.";
   return {
     code: "provider_unknown",
     message,
@@ -97,14 +101,22 @@ export function normalizeReplicateFailure(error, context = {}) {
   };
 }
 
-export class ReplicateDreamActorProvider {
+export class ReplicateDreamActorProvider implements Provider {
+  id: string;
+  displayName: string;
+  apiToken?: string;
+  modelId: string;
+  timeoutSec: number;
+  pollIntervalMs: number;
+  fetchImpl: typeof fetch;
+
   constructor({
     apiToken,
     modelId = "bytedance/dreamactor-m2.0",
     timeoutSec = 600,
     pollIntervalMs = 2000,
     fetchImpl = fetch
-  } = {}) {
+  }: { apiToken?: string; modelId?: string; timeoutSec?: number; pollIntervalMs?: number; fetchImpl?: typeof fetch } = {}) {
     this.id = "replicate-dreamactor";
     this.displayName = "Replicate DreamActor M2.0";
     this.apiToken = apiToken;
@@ -114,7 +126,7 @@ export class ReplicateDreamActorProvider {
     this.fetchImpl = fetchImpl;
   }
 
-  listCapabilities() {
+  listCapabilities(): AnyRecord {
     return {
       defaultModelId: this.modelId,
       pollIntervalMs: this.pollIntervalMs,
@@ -122,13 +134,13 @@ export class ReplicateDreamActorProvider {
     };
   }
 
-  validateRun({ referenceAsset, sourceAsset, preset }) {
+  validateRun({ referenceAsset, sourceAsset, preset }: { referenceAsset: Asset; sourceAsset: Asset; preset: Preset }): void {
     this.assertConfigured();
     this.assertImageAsset(referenceAsset);
     this.assertDrivingAsset(sourceAsset, preset);
   }
 
-  buildPredictionInput({ preset, referenceInput, sourceInput }) {
+  buildPredictionInput({ preset, referenceInput, sourceInput }: { preset: Preset; referenceInput: string; sourceInput: string }): AnyRecord {
     const providerOptions = getPresetOptions(preset, this.id);
     return {
       image: referenceInput,
@@ -137,7 +149,7 @@ export class ReplicateDreamActorProvider {
     };
   }
 
-  async submitRun(context) {
+  async submitRun(context: AnyRecord) {
     this.assertConfigured();
 
     const referenceInput = await this.resolveInput(context.referenceAsset, context.referenceImagePath);
@@ -153,12 +165,12 @@ export class ReplicateDreamActorProvider {
 
     const response = await this.fetchReplicate(createReplicateApiUrl(this.modelId), {
       method: "POST",
-      headers: buildReplicateHeaders(this.apiToken, {
+      headers: buildReplicateHeaders(this.apiToken!, {
         "Cancel-After": `${this.timeoutSec}s`
       }),
       body: JSON.stringify(requestBody)
     });
-    const payload = await response.json();
+    const payload = (await response.json()) as AnyRecord;
     this.assertReplicateOk(response, payload);
 
     return {
@@ -172,7 +184,7 @@ export class ReplicateDreamActorProvider {
     };
   }
 
-  async pollRun(state) {
+  async pollRun(state: ProviderState) {
     this.assertConfigured();
     const pollUrl = state.pollUrl || state.getUrl;
     if (!pollUrl) {
@@ -181,9 +193,9 @@ export class ReplicateDreamActorProvider {
 
     const response = await this.fetchReplicate(pollUrl, {
       method: "GET",
-      headers: buildReplicateHeaders(this.apiToken)
+      headers: buildReplicateHeaders(this.apiToken!)
     });
-    const payload = await response.json();
+    const payload = (await response.json()) as AnyRecord;
     this.assertReplicateOk(response, payload);
 
     return {
@@ -193,7 +205,7 @@ export class ReplicateDreamActorProvider {
     };
   }
 
-  async cancelRun(state) {
+  async cancelRun(state: ProviderState): Promise<any> {
     if (!state.cancelUrl || !this.apiToken) {
       return null;
     }
@@ -207,12 +219,12 @@ export class ReplicateDreamActorProvider {
       return null;
     }
 
-    const payload = await response.json();
+    const payload = (await response.json()) as AnyRecord;
     this.assertReplicateOk(response, payload);
     return payload;
   }
 
-  async collectResult(state, context) {
+  async collectResult(state: ProviderState, context: AnyRecord) {
     const outputUrl = extractOutputUrl(state.output);
     if (!outputUrl) {
       throw new ProviderError("provider_output_missing", "Replicate completed without an output URL.", {
@@ -245,7 +257,7 @@ export class ReplicateDreamActorProvider {
     };
   }
 
-  toProviderState(payload) {
+  toProviderState(payload: AnyRecord): ProviderState {
     return {
       providerRunId: payload.id,
       modelId: payload.model || this.modelId,
@@ -263,8 +275,8 @@ export class ReplicateDreamActorProvider {
     };
   }
 
-  normalizeTerminalState(state) {
-    if (SUCCESS_STATUSES.has(state.status)) {
+  normalizeTerminalState(state: ProviderState): ProviderError | null {
+    if (SUCCESS_STATUSES.has(state.status || "")) {
       return null;
     }
     if (state.status === "canceled" || state.status === "cancelled") {
@@ -274,16 +286,16 @@ export class ReplicateDreamActorProvider {
     }
     const errorText = String(state.error || "").toLowerCase();
     if (errorText.includes("input") || errorText.includes("dimension") || errorText.includes("duration") || errorText.includes("unsupported")) {
-      return new ProviderError("provider_rejected_input", state.error || "Replicate rejected the submitted media.", {
+      return new ProviderError("provider_rejected_input", String(state.error || "Replicate rejected the submitted media."), {
         providerStatus: state.status
       });
     }
-    return new ProviderError("provider_run_failed", state.error || "Replicate failed the prediction.", {
+    return new ProviderError("provider_run_failed", String(state.error || "Replicate failed the prediction."), {
       providerStatus: state.status
     });
   }
 
-  async resolveInput(asset, filePath) {
+  async resolveInput(asset: Asset, filePath: string): Promise<string> {
     if (asset.locator?.type === "azure-blob" && asset.locator.url) {
       return asset.locator.url;
     }
@@ -292,13 +304,13 @@ export class ReplicateDreamActorProvider {
     return createDataUrl(asset.contentType || contentTypeForExtension(asset.extension), buffer);
   }
 
-  assertConfigured() {
+  assertConfigured(): void {
     if (!this.apiToken) {
       throw new ProviderError("provider_auth", "AVATAR_REPLICATE_API_TOKEN is required for Replicate runs.");
     }
   }
 
-  assertImageAsset(asset) {
+  assertImageAsset(asset: Asset): void {
     const withinWidth = asset.media.width >= 480 && asset.media.width <= 1920;
     const withinHeight = asset.media.height >= 480 && asset.media.height <= 1080;
     if (!asset.media.sizeBytes || !asset.media.width || !asset.media.height || !withinWidth || !withinHeight) {
@@ -309,7 +321,7 @@ export class ReplicateDreamActorProvider {
     }
   }
 
-  assertDrivingAsset(asset, preset) {
+  assertDrivingAsset(asset: Asset, preset: Preset): void {
     const maxDurationSec = Math.min(preset.maxDurationSec, 30);
     const withinWidth = asset.media.width >= 200 && asset.media.width <= 2048;
     const withinHeight = asset.media.height >= 200 && asset.media.height <= 1440;
@@ -330,17 +342,17 @@ export class ReplicateDreamActorProvider {
     }
   }
 
-  async fetchReplicate(url, init) {
+  async fetchReplicate(url: string, init: RequestInit): Promise<Response> {
     try {
       return await this.fetchImpl(url, init);
     } catch (error) {
-      throw new ProviderError("provider_unavailable", `Replicate request failed: ${error.message}`, {
+      throw new ProviderError("provider_unavailable", error instanceof Error ? `Replicate request failed: ${error.message}` : "Replicate request failed", {
         retryable: true
       });
     }
   }
 
-  assertReplicateOk(response, payload) {
+  assertReplicateOk(response: Response, payload: AnyRecord): void {
     if (response.ok) {
       return;
     }
@@ -368,8 +380,15 @@ export class ReplicateDreamActorProvider {
   }
 }
 
-class AsyncMockProvider {
-  constructor(providerId = "mock-provider", fetchImpl = fetch) {
+class AsyncMockProvider implements Provider {
+  id: string;
+  displayName: string;
+  fetchImpl: typeof fetch;
+  modelId: string;
+  pollIntervalMs: number;
+  timeoutSec: number;
+
+  constructor(providerId = "mock-provider", fetchImpl: typeof fetch = fetch) {
     this.id = providerId;
     this.displayName = "Mock Retargeting Provider";
     this.fetchImpl = fetchImpl;
@@ -378,7 +397,7 @@ class AsyncMockProvider {
     this.timeoutSec = 5;
   }
 
-  listCapabilities() {
+  listCapabilities(): AnyRecord {
     return {
       defaultModelId: this.modelId,
       pollIntervalMs: this.pollIntervalMs,
@@ -386,16 +405,16 @@ class AsyncMockProvider {
     };
   }
 
-  validateRun() {}
+  validateRun(): void {}
 
-  buildPredictionInput({ preset }) {
+  buildPredictionInput({ preset }: { preset: Preset }): AnyRecord {
     return {
       width: preset.width,
       height: preset.height
     };
   }
 
-  async submitRun(context) {
+  async submitRun(context: AnyRecord) {
     return {
       providerRunId: `mock-${context.runId}`,
       providerState: {
@@ -418,7 +437,7 @@ class AsyncMockProvider {
     };
   }
 
-  async pollRun(state) {
+  async pollRun(state: ProviderState) {
     await sleep(this.pollIntervalMs);
     return {
       providerState: {
@@ -435,11 +454,11 @@ class AsyncMockProvider {
     };
   }
 
-  async cancelRun() {
+  async cancelRun(): Promise<null> {
     return null;
   }
 
-  async collectResult(state, context) {
+  async collectResult(state: ProviderState, context: AnyRecord) {
     const { sourceVideoPath, preset } = state.mockContext;
     const tmpDir = path.join(os.tmpdir(), "avatar-project", context.runId);
     await ensureDir(tmpDir);
@@ -475,13 +494,13 @@ class AsyncMockProvider {
     };
   }
 
-  normalizeTerminalState() {
+  normalizeTerminalState(): null {
     return null;
   }
 }
 
-export function createProviderRegistry(config = {}, options = {}) {
-  const providers = new Map();
+export function createProviderRegistry(config: Partial<ProjectConfig> = {}, options: { fetchImpl?: typeof fetch; includeMocks?: boolean; mockProviderId?: string; extraProviders?: Provider[] } = {}) {
+  const providers = new Map<string, Provider>();
   const replicateProvider = new ReplicateDreamActorProvider({
     apiToken: config.replicateApiToken,
     modelId: config.replicateModel,
@@ -502,14 +521,14 @@ export function createProviderRegistry(config = {}, options = {}) {
   }
 
   return {
-    get(providerId) {
+    get(providerId: string) {
       const provider = providers.get(providerId);
       if (!provider) {
         throw new Error(`Unknown provider "${providerId}". Available providers: ${[...providers.keys()].join(", ")}`);
       }
       return provider;
     },
-    list() {
+    list(): string[] {
       return [...providers.keys()];
     }
   };

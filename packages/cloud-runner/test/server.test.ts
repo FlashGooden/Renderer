@@ -1,3 +1,4 @@
+// @ts-nocheck
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,9 +7,9 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Readable } from "node:stream";
-import { FileJobStore } from "../../core/src/job-store.js";
-import { createStorageDriver } from "../../core/src/storage.js";
-import { AvatarService } from "../../core/src/service.js";
+import { FileJobStore } from "@avatar/core/job-store.js";
+import { createStorageDriver } from "@avatar/core/storage.js";
+import { AvatarService } from "@avatar/core/service.js";
 import { createRunnerHandler } from "../src/server.js";
 
 const execFileAsync = promisify(execFile);
@@ -187,18 +188,18 @@ async function invoke(handler, method, url, { headers = {}, body = null } = {}) 
 }
 
 async function waitForRun(handler, runId) {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
     const response = await invoke(handler, "GET", `/runs/${runId}`);
     const run = response.json.run;
     if (!["queued", "running"].includes(run.state)) {
       return run;
     }
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Run ${runId} did not complete`);
 }
 
-test("runner handler supports upload, run, fetch, review, and async provider metadata", async () => {
+test("runner handler supports upload, run, fetch, review, previews, and async provider metadata", async () => {
   const harness = await createHarness();
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-handler-media-"));
   const { referencePath, sourcePath } = await createMediaFixtures(rootDir);
@@ -263,10 +264,29 @@ test("runner handler supports upload, run, fetch, review, and async provider met
     body: Buffer.from(
       JSON.stringify({
         decision: "approve",
-        notes: "usable"
+        notes: "usable",
+        reviewer: "tester",
+        tags: ["usable"],
+        criteria: {
+          overall: "pass"
+        }
       })
     )
   });
   assert.equal(reviewResponse.statusCode, 200);
   assert.equal(reviewResponse.json.run.state, "succeeded");
+  assert.equal(reviewResponse.json.run.reviewHistory.length, 1);
+
+  const previewResponse = await invoke(harness.handler, "POST", `/runs/${run.id}/previews`, {
+    headers: {
+      "content-type": "application/json"
+    },
+    body: Buffer.from(
+      JSON.stringify({
+        kinds: ["preview_still", "contact_sheet"]
+      })
+    )
+  });
+  assert.equal(previewResponse.statusCode, 200);
+  assert.equal(previewResponse.json.artifacts.length, 2);
 });

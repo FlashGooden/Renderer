@@ -1,18 +1,21 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createReadStream } from "node:fs";
+import { createReadStream, type ReadStream } from "node:fs";
 import { ensureDir } from "./fs-utils.js";
+import type { ProjectConfig, StorageDriver, StorageLocator } from "./types.js";
 
-export class LocalStorageDriver {
-  constructor(rootDir) {
+export class LocalStorageDriver implements StorageDriver {
+  rootDir: string;
+
+  constructor(rootDir: string) {
     this.rootDir = path.join(rootDir, "blobs");
   }
 
-  async initialize() {
+  async initialize(): Promise<void> {
     await ensureDir(this.rootDir);
   }
 
-  async putBuffer(relativePath, buffer) {
+  async putBuffer(relativePath: string, buffer: Buffer): Promise<StorageLocator> {
     const absolutePath = path.join(this.rootDir, relativePath);
     await ensureDir(path.dirname(absolutePath));
     await fs.writeFile(absolutePath, buffer);
@@ -22,7 +25,7 @@ export class LocalStorageDriver {
     };
   }
 
-  async putFile(relativePath, sourcePath) {
+  async putFile(relativePath: string, sourcePath: string): Promise<StorageLocator> {
     const absolutePath = path.join(this.rootDir, relativePath);
     await ensureDir(path.dirname(absolutePath));
     await fs.copyFile(sourcePath, absolutePath);
@@ -32,26 +35,34 @@ export class LocalStorageDriver {
     };
   }
 
-  async readBuffer(locator) {
+  async readBuffer(locator: StorageLocator): Promise<Buffer> {
+    if (!locator.path) {
+      throw new Error("Local storage locator is missing a path.");
+    }
     return fs.readFile(locator.path);
   }
 
-  createReadStream(locator) {
+  createReadStream(locator: StorageLocator): ReadStream {
+    if (!locator.path) {
+      throw new Error("Local storage locator is missing a path.");
+    }
     return createReadStream(locator.path);
   }
 }
 
-export class AzureBlobStorageDriver {
-  constructor(baseUrl) {
+export class AzureBlobStorageDriver implements StorageDriver {
+  baseUrl: string;
+
+  constructor(baseUrl: string) {
     if (!baseUrl) {
       throw new Error("AVATAR_AZURE_BLOB_BASE_URL is required for azure-blob storage mode.");
     }
     this.baseUrl = baseUrl;
   }
 
-  async initialize() {}
+  async initialize(): Promise<void> {}
 
-  buildUrl(relativePath) {
+  buildUrl(relativePath: string): string {
     const url = new URL(this.baseUrl);
     const cleanBasePath = url.pathname.replace(/\/+$/, "");
     const cleanRelativePath = relativePath.replace(/^\/+/, "");
@@ -59,7 +70,7 @@ export class AzureBlobStorageDriver {
     return url.toString();
   }
 
-  async putBuffer(relativePath, buffer, contentType = "application/octet-stream") {
+  async putBuffer(relativePath: string, buffer: Buffer, contentType = "application/octet-stream"): Promise<StorageLocator> {
     const url = this.buildUrl(relativePath);
     const response = await fetch(url, {
       method: "PUT",
@@ -81,12 +92,15 @@ export class AzureBlobStorageDriver {
     };
   }
 
-  async putFile(relativePath, sourcePath, contentType = "application/octet-stream") {
+  async putFile(relativePath: string, sourcePath: string, contentType = "application/octet-stream"): Promise<StorageLocator> {
     const buffer = await fs.readFile(sourcePath);
     return this.putBuffer(relativePath, buffer, contentType);
   }
 
-  async readBuffer(locator) {
+  async readBuffer(locator: StorageLocator): Promise<Buffer> {
+    if (!locator.url) {
+      throw new Error("Azure Blob locator is missing a URL.");
+    }
     const response = await fetch(locator.url);
     if (!response.ok) {
       throw new Error(`Azure Blob download failed with status ${response.status}.`);
@@ -94,12 +108,12 @@ export class AzureBlobStorageDriver {
     return Buffer.from(await response.arrayBuffer());
   }
 
-  createReadStream() {
+  createReadStream(): never {
     throw new Error("Streaming Azure Blob artifacts is not supported by this minimal implementation.");
   }
 }
 
-export function createStorageDriver(config) {
+export function createStorageDriver(config: ProjectConfig): StorageDriver {
   if (config.storageMode === "azure-blob") {
     return new AzureBlobStorageDriver(config.azureBlobBaseUrl);
   }

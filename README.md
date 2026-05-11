@@ -92,5 +92,5 @@ The current runner is intentionally small:
 - `avatar run --reference <asset-id> --video <asset-id> [--preset preview-720p] [--provider replicate-dreamactor]`
 - `avatar status <run-id> [--json]`
 - `avatar fetch <run-id> [--output-dir ./outputs]`
-- `avatar review <run-id> --decision approve|reject [--notes "..."] [--tag quality]`
+- `avatar review <run-id> --decision approve|reject [--notes "..."]`
 - `avatar compare <run-id-a> <run-id-b> [--json]`

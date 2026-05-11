@@ -3,3 +3,6 @@ node_modules/
 .avatar/
 tmp/
 
+dist/
+
+.claude/worktrees/

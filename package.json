@@ -7,9 +7,14 @@
     "packages/*"
   ],
   "scripts": {
-    "avatar": "node packages/cli/src/index.js",
-    "runner": "node packages/cloud-runner/src/server.js",
-    "test": "node --test packages/core/test/*.test.js packages/cloud-runner/test/*.test.js"
+    "avatar": "npm run build --silent && node packages/cli/dist/src/index.js",
+    "runner": "npm run build --silent && node packages/cloud-runner/dist/src/server.js",
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "npm run build --silent && node --test packages/core/dist/test/*.test.js packages/cloud-runner/dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.2",
+    "typescript": "^6.0.3"
   }
 }
-
