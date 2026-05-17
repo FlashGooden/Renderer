@@ -8,6 +8,10 @@ CLI-first personal tooling for short avatar motion-retargeting experiments. The 
 
 The default provider implementation targets Replicate DreamActor M2.0 through the async Predictions API. A mock provider remains available only for tests and offline fixtures.
 
+## Architecture Decisions
+
+Architecture Decision Records live in [docs/adr/](docs/adr/). Start there for the documented project decisions, the reusable ADR template, and the coverage tracker for decisions that are documented or still pending.
+
 ## Quick Start
 
 1. Start the runner:

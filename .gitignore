@@ -4,6 +4,14 @@ node_modules/
 tmp/
 
 dist/
+build/
+*.log
+.env*
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/
 
 .claude/worktrees/
 
