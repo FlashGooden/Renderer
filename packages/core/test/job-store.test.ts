@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { FileJobStore } from "../src/job-store.js";
 
-function makeRun(id, state = "queued", createdAt = "2026-01-01T00:00:00.000Z") {
+function makeRun(id, state = "queued", createdAt = "2026-01-01T00:00:00.000Z", overrides = {}) {
   return {
     id,
     state,
@@ -48,7 +48,8 @@ function makeRun(id, state = "queued", createdAt = "2026-01-01T00:00:00.000Z") {
     createdAt,
     updatedAt: createdAt,
     startedAt: null,
-    completedAt: null
+    completedAt: null,
+    ...overrides
   };
 }
 
@@ -90,6 +91,66 @@ test("FileJobStore moves archived runs and falls back to archive path", async ()
 
   const succeededRuns = await store.listRuns({ includeArchived: true, states: ["succeeded"] });
   assert.deepEqual(succeededRuns.map((run) => run.id), ["run_done"]);
+});
+
+test("FileJobStore updates archived runs without restoring them to live listings", async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-job-store-"));
+  const store = new FileJobStore(rootDir);
+  await store.initialize();
+
+  await store.createRun(makeRun("run_done", "succeeded", "2026-01-02T00:00:00.000Z"));
+  await store.archiveRun("run_done", "retention");
+
+  const updated = await store.updateRun("run_done", (current) => ({
+    ...current,
+    notes: "reviewed after archive",
+    archived: false,
+    updatedAt: "2026-01-03T00:00:00.000Z"
+  }));
+
+  assert.equal(updated.notes, "reviewed after archive");
+  assert.equal(updated.archived, true);
+  await assert.rejects(fs.stat(path.join(rootDir, "runs", "run_done.json")));
+
+  const archivedRecord = JSON.parse(await fs.readFile(path.join(rootDir, "archive", "runs", "run_done.json"), "utf8"));
+  assert.equal(archivedRecord.notes, "reviewed after archive");
+  assert.equal(archivedRecord.archived, true);
+
+  const fallbackRun = await store.getRun("run_done");
+  assert.equal(fallbackRun?.notes, "reviewed after archive");
+  assert.equal(fallbackRun?.archived, true);
+
+  assert.deepEqual(await store.listRuns(), []);
+  const allRuns = await store.listRuns({ includeArchived: true });
+  assert.deepEqual(allRuns.map((run) => run.id), ["run_done"]);
+  assert.equal(allRuns[0].notes, "reviewed after archive");
+  assert.equal(allRuns[0].archived, true);
+});
+
+test("FileJobStore updates live runs without creating archived records", async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "avatar-job-store-"));
+  const store = new FileJobStore(rootDir);
+  await store.initialize();
+
+  await store.createRun(makeRun("run_live", "running", "2026-01-02T00:00:00.000Z"));
+
+  const updated = await store.updateRun("run_live", {
+    notes: "still active",
+    updatedAt: "2026-01-03T00:00:00.000Z"
+  });
+
+  assert.equal(updated.notes, "still active");
+  assert.equal(updated.archived, undefined);
+  assert.equal((await fs.stat(path.join(rootDir, "runs", "run_live.json"))).isFile(), true);
+  await assert.rejects(fs.stat(path.join(rootDir, "archive", "runs", "run_live.json")));
+
+  const liveRecord = JSON.parse(await fs.readFile(path.join(rootDir, "runs", "run_live.json"), "utf8"));
+  assert.equal(liveRecord.notes, "still active");
+  assert.equal(liveRecord.archived, undefined);
+
+  const liveRuns = await store.listRuns();
+  assert.deepEqual(liveRuns.map((run) => run.id), ["run_live"]);
+  assert.equal(liveRuns[0].notes, "still active");
 });
 
 test("FileJobStore applies default and capped listRuns limits", async () => {

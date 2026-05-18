@@ -119,13 +119,17 @@ export class FileJobStore implements JobStore {
   }
 
   async updateRun(runId: string, updater: Partial<Run> | ((run: Run) => Run | Promise<Run>)): Promise<Run> {
-    const current = await this.getRun(runId);
+    const liveRun = await readJson<Run>(this.runPath(runId));
+    const current = liveRun || (await readJson<Run>(this.archiveRunPath(runId)));
     if (!current) {
       throw new Error(`Run "${runId}" was not found.`);
     }
-    const next = typeof updater === "function" ? await updater(current) : { ...current, ...updater };
-    await writeJson(this.runPath(runId), next);
-    return next;
+    const targetPath = liveRun ? this.runPath(runId) : this.archiveRunPath(runId);
+    const currentRun = liveRun ? current : { ...current, archived: true };
+    const next = typeof updater === "function" ? await updater(currentRun) : { ...currentRun, ...updater };
+    const persistedRun = liveRun ? next : { ...next, archived: true };
+    await writeJson(targetPath, persistedRun);
+    return persistedRun;
   }
 
   async archiveRun(runId: string, reason = ""): Promise<Run> {
