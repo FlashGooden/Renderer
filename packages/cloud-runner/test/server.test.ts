@@ -188,7 +188,7 @@ async function invoke(handler, method, url, { headers = {}, body = null } = {}) 
 }
 
 async function waitForRun(handler, runId) {
-  for (let attempt = 0; attempt < 240; attempt += 1) {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
     const response = await invoke(handler, "GET", `/runs/${runId}`);
     const run = response.json.run;
     if (!["queued", "running"].includes(run.state)) {

@@ -54,6 +54,33 @@ test("evaluateRun returns structured metrics for a valid output video", async ()
   assert.equal(Array.isArray(result.identityRetention.sampledFrameScores), true);
 });
 
+test("evaluateRun reports source-to-output PSNR and VMAF quality metrics", async () => {
+  const dir = await makeFixtureDir();
+  const sourcePath = path.join(dir, "source.mp4");
+  const referencePath = path.join(dir, "reference.png");
+  const outputPath = path.join(dir, "output.mp4");
+
+  await makeVideo(sourcePath, "testsrc=size=320x240:rate=24");
+  await makeReferenceImage(referencePath);
+  await fs.copyFile(sourcePath, outputPath);
+
+  const result = await evaluateRun({
+    sourceVideoPath: sourcePath,
+    referenceImagePath: referencePath,
+    outputVideoPath: outputPath
+  });
+
+  assert.equal(typeof result.qualityMetrics.psnr, "number");
+  assert.equal(result.qualityMetrics.psnr >= 45, true);
+  assert.equal(
+    result.qualityMetrics.vmaf === null ||
+      (typeof result.qualityMetrics.vmaf === "number" &&
+        result.qualityMetrics.vmaf >= 0 &&
+        result.qualityMetrics.vmaf <= 100),
+    true
+  );
+});
+
 test("evaluateRun flags duration mismatch", async () => {
   const dir = await makeFixtureDir();
   const sourcePath = path.join(dir, "source.mp4");
