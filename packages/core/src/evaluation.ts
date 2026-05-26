@@ -6,6 +6,8 @@ import { promisify } from "node:util";
 import { inspectMedia } from "./media.js";
 
 const execFileAsync = promisify(execFile);
+const qualityMetricInputFilter =
+  "fps=6,scale=160:160:force_original_aspect_ratio=decrease,pad=160:160:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS";
 
 function clamp(value: number, min = 0, max = 1): number {
   return Math.max(min, Math.min(max, value));
@@ -20,6 +22,13 @@ function average(values: number[]): number {
 
 function round(value: number): number {
   return Math.round(value * 1000) / 1000;
+}
+
+function parseBoundedQualityScore(value: string): number {
+  if (value.toLowerCase() === "inf") {
+    return 100;
+  }
+  return clamp(Number(value), 0, 100);
 }
 
 function buildResult({
@@ -41,6 +50,8 @@ function buildResult({
   excessMotionEnergy,
   corruptionScore,
   blackFrameRatio,
+  psnr,
+  vmaf,
   hasVideoStream,
   flags
 }: {
@@ -62,6 +73,8 @@ function buildResult({
   excessMotionEnergy: number;
   corruptionScore: number;
   blackFrameRatio: number;
+  psnr: number | null;
+  vmaf: number | null;
   hasVideoStream: boolean;
   flags: string[];
 }) {
@@ -105,6 +118,10 @@ function buildResult({
       blackFrameRatio: round(blackFrameRatio),
       severeDurationMismatch: durationDeltaSec > 0.75,
       severeFrameRateMismatch: frameRateDelta > 8
+    },
+    qualityMetrics: {
+      psnr: psnr === null ? null : round(psnr),
+      vmaf: vmaf === null ? null : round(vmaf)
     },
     identityScore: round(identityScore),
     motionScore: round(motionScore),
@@ -159,6 +176,52 @@ async function computeSsimScore(inputA: string, inputB: string): Promise<number>
 
   const match = stderr.match(/All:([0-9.]+)/);
   return match ? clamp(Number(match[1])) : 0;
+}
+
+async function computePsnrScore(sourceVideoPath: string, outputVideoPath: string): Promise<number | null> {
+  const { stderr } = await execFileAsync("ffmpeg", [
+    "-i",
+    sourceVideoPath,
+    "-i",
+    outputVideoPath,
+    "-filter_complex",
+    `[0:v]${qualityMetricInputFilter}[ref];[1:v]${qualityMetricInputFilter}[dist];[ref][dist]psnr=shortest=1`,
+    "-f",
+    "null",
+    "-"
+  ]);
+
+  const match = stderr.match(/average:([0-9.]+|inf)/i);
+  return match ? parseBoundedQualityScore(match[1]) : null;
+}
+
+async function computeVmafScore(sourceVideoPath: string, outputVideoPath: string): Promise<number | null> {
+  const { stderr } = await execFileAsync("ffmpeg", [
+    "-i",
+    sourceVideoPath,
+    "-i",
+    outputVideoPath,
+    "-filter_complex",
+    `[0:v]${qualityMetricInputFilter}[ref];[1:v]${qualityMetricInputFilter}[dist];[dist][ref]libvmaf=shortest=1:n_subsample=4:n_threads=2`,
+    "-f",
+    "null",
+    "-"
+  ]);
+
+  const match = stderr.match(/VMAF score:\s*([0-9.]+)/i);
+  return match ? parseBoundedQualityScore(match[1]) : null;
+}
+
+async function computeQualityMetrics(sourceVideoPath: string, outputVideoPath: string): Promise<{ psnr: number | null; vmaf: number | null }> {
+  const [psnr, vmaf] = await Promise.all([
+    computePsnrScore(sourceVideoPath, outputVideoPath).catch(() => null),
+    computeVmafScore(sourceVideoPath, outputVideoPath).catch(() => null)
+  ]);
+
+  return {
+    psnr,
+    vmaf
+  };
 }
 
 async function computeSceneChangeRate(videoPath: string, durationSec: number): Promise<number> {
@@ -275,6 +338,8 @@ export async function evaluateRun({ sourceVideoPath, referenceImagePath, outputV
       excessMotionEnergy: 0,
       corruptionScore: 0,
       blackFrameRatio: 0,
+      psnr: null,
+      vmaf: null,
       hasVideoStream: false,
       flags: ["broken_output", "decode_failure", "corruption_risk"]
     });
@@ -289,10 +354,11 @@ export async function evaluateRun({ sourceVideoPath, referenceImagePath, outputV
     const sourceFrames = await extractFrames(sourceVideoPath, motionTimes, frameDir, "source");
     const matchedOutputFrames = motionTimes.length === identityTimes.length ? outputFrames : await extractFrames(outputVideoPath, motionTimes, frameDir, "motion-output");
 
-    const [decodeProbe, sceneChangeRate, blackFrameRatio] = await Promise.all([
+    const [decodeProbe, sceneChangeRate, blackFrameRatio, qualityMetrics] = await Promise.all([
       probeDecode(outputVideoPath),
       computeSceneChangeRate(outputVideoPath, outputMeta.durationSec).catch(() => 0),
-      computeBrightnessRatio(outputFrames).catch(() => 0)
+      computeBrightnessRatio(outputFrames).catch(() => 0),
+      computeQualityMetrics(sourceVideoPath, outputVideoPath)
     ]);
 
     const identityFrameScores: number[] = [];
@@ -407,6 +473,8 @@ export async function evaluateRun({ sourceVideoPath, referenceImagePath, outputV
       excessMotionEnergy,
       corruptionScore,
       blackFrameRatio,
+      psnr: qualityMetrics.psnr,
+      vmaf: qualityMetrics.vmaf,
       hasVideoStream,
       flags
     });
